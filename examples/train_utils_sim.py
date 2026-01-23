@@ -231,14 +231,14 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
             if i == 0:
                 # for initial round of data collection, we sample from standard gaussian noise
                 noise = jax.random.normal(key, (1, *agent.action_chunk_shape))
-                noise_repeat = jax.numpy.repeat(noise[:, -1:, :], 50 - noise.shape[1], axis=1)
+                noise_repeat = jax.numpy.repeat(noise[:, -1:, :], 10 - noise.shape[1], axis=1) # here the action horizon is hardcoded -- for pi0 it is 50, and for pi05 it is 10
                 noise = jax.numpy.concatenate([noise, noise_repeat], axis=1)
                 actions_noise = noise[0, :agent.action_chunk_shape[0], :]
             else:
                 # sac agent predicts the noise for diffusion model
                 actions_noise = agent.sample_actions(obs_dict)
                 actions_noise = np.reshape(actions_noise, agent.action_chunk_shape)
-                noise = np.repeat(actions_noise[-1:, :], 50 - actions_noise.shape[0], axis=0)
+                noise = np.repeat(actions_noise[-1:, :], 10 - actions_noise.shape[0], axis=0)  # here the action horizon is hardcoded -- for pi0 it is 50, and for pi05 it is 10
                 noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
             
             actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
@@ -342,11 +342,11 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
                 
                 if i == 0:
                     # for initial evaluation, we sample from standard gaussian noise to evaluate the base policy's performance
-                    noise = jax.random.normal(rng, (1, 50, 32))
+                    noise = jax.random.normal(rng, (1, 10, 32))
                 else:
                     actions_noise = agent.sample_actions(obs_dict)
                     actions_noise = np.reshape(actions_noise, agent.action_chunk_shape)
-                    noise = np.repeat(actions_noise[-1:, :], 50 - actions_noise.shape[0], axis=0)
+                    noise = np.repeat(actions_noise[-1:, :], 10 - actions_noise.shape[0], axis=0)
                     noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
                     
                 actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]

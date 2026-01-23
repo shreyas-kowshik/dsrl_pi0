@@ -110,14 +110,15 @@ def main(variant):
     
     if variant.env == 'libero':
         benchmark_dict = benchmark.get_benchmark_dict()
-        task_suite = benchmark_dict["libero_90"]()
-        task_id = 57
+        task_suite = benchmark_dict["libero_10"]()
+        task_id = 8  # KITCHEN_SCENE8_put_both_moka_pots_on_the_stove_demo.hdf5
         task = task_suite.get_task(task_id)
-        env, task_description = _get_libero_env(task, 256, variant.seed)
+        env, task_description = _get_libero_env(task, 224, variant.seed)
         eval_env = env
         variant.task_description = task_description
         variant.env_max_reward = 1
-        variant.max_timesteps = 400
+        variant.max_timesteps = 500
+        print("Libero environment initialised with task description:", task_description)
     elif variant.env == 'aloha_cube':
         from gymnasium.envs.registration import register
         register(
@@ -130,7 +131,7 @@ def main(variant):
         env = gym.make("gym_aloha/AlohaTransferCube-v0", obs_type="pixels_agent_pos", render_mode="rgb_array")
         eval_env = copy.deepcopy(env)
         variant.env_max_reward = 4
-        variant.max_timesteps = 400
+        variant.max_timesteps = 500
         
 
     group_name = variant.prefix + '_' + variant.launch_group_id
@@ -145,8 +146,8 @@ def main(variant):
     
 
     if variant.env == 'libero':
-        config = openpi_config.get_config("pi0_libero")
-        checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
+        config = openpi_config.get_config(variant.pi_05_config)
+        checkpoint_dir = download.maybe_download(variant.pi_05_ckpt_dir)
     elif variant.env == 'aloha_cube':
         config = openpi_config.get_config("pi0_aloha_sim")
         checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_aloha_sim")

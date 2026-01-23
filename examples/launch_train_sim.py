@@ -25,7 +25,9 @@ if __name__ == '__main__':
     parser.add_argument('--multi_grad_step', default=1, help='Number of graident steps to take per environment step, aka UTD', type=int)
     parser.add_argument('--resize_image', default=-1, help='the size of image if need resizing', type=int)
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
-    
+    parser.add_argument('--pi_05_config', default='', help='config name for pi05 model', type=str)
+    parser.add_argument('--pi_05_ckpt_dir', default='', help='checkpoint dir for pi05 model', type=str)
+
     train_args_dict = dict(
         actor_lr=1e-4,
         critic_lr= 3e-4,
