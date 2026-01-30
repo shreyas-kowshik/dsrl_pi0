@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=residual_sac_pi0      # Job name
+#SBATCH --job-name=residual_sac_pi05      # Job name
 #SBATCH --nodes=1                          # Number of nodes
 #SBATCH --gres=gpu:1                       # GPUs per node
 #SBATCH --cpus-per-task=12                 # CPU cores per task
 #SBATCH --mem=128G                         # Memory per node
 #SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
 #SBATCH --partition=general                # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/dsrl_logs/logs/residual_sac_libero_pi0_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/sreyasv/dsrl_logs/logs/residual_sac_libero_pi0_%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/sreyasv/dsrl_logs/logs/residual_sac_libero_pi05_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/sreyasv/dsrl_logs/logs/residual_sac_libero_pi05_%x_%j.err    # Stderr log
 
 # -------------------------------
 # Environment setup
@@ -43,7 +43,7 @@ pip install mujoco==3.3.1
 python -m examples.launch_train_sim_residual \
     --algorithm residual_sac \
     --env libero \
-    --prefix dsrl_residual_pi0_libero_put-both-moka-pots-on-stove_low_ent_clip_temp_true \
+    --prefix residual_pi05_libero_put-both-moka-pots-on-stove_low_ent_clip_temp_true \
     --wandb_project ${proj_name} \
     --batch_size 256 \
     --discount 0.999 \
@@ -51,7 +51,7 @@ python -m examples.launch_train_sim_residual \
     --max_steps 500000 \
     --eval_interval 10000 \
     --log_interval 500 \
-    --checkpoint_interval 50000 \
+    --checkpoint_interval 500000 \
     --eval_episodes 10 \
     --multi_grad_step 20 \
     --start_online_updates 500 \
@@ -59,9 +59,9 @@ python -m examples.launch_train_sim_residual \
     --action_magnitude 1.0 \
     --query_freq 10 \
     --hidden_dims 128 \
-    --pi_05_config pi0_libero_finetuned \
-    --pi_05_ckpt_dir gs://openpi-assets/checkpoints/pi0_libero \
+    --pi_05_config pi05_libero_finetuned \
+    --pi_05_ckpt_dir gs://openpi-assets/checkpoints/pi05_libero \
     --residual_alpha 0.1 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
-    --target_entropy -105.0 \
+    --target_entropy -21.0 \

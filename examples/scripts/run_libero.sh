@@ -44,7 +44,7 @@ python -m examples.launch_train_sim \
 --max_steps 500000  \
 --eval_interval 10000 \
 --log_interval 500 \
---checkpoint_interval 50000 \
+--checkpoint_interval 500000 \
 --eval_episodes 10 \
 --multi_grad_step 20 \
 --start_online_updates 500 \
@@ -53,4 +53,4 @@ python -m examples.launch_train_sim \
 --query_freq 8 \
 --hidden_dims 128 \
 --pi_05_config pi05_libero_finetuned_two_moka_pots \
---pi_05_ckpt_dir /data/hf_cache/models/clean_pi05_libero_29episodes_chkpt500 \
+--pi_05_ckpt_dir /data/hf_cache/models/pi05_libero_ep5_mokapots_4k/ \

@@ -95,3 +95,36 @@ class LearnedStdTanhNormalPolicy(nn.Module):
 
         distribution = TanhMultivariateNormalDiag(loc=means, scale_diag=jnp.exp(log_stds), low=self.low, high=self.high)
         return distribution
+
+
+class DeterministicTanhPolicy(nn.Module):
+    hidden_dims: Sequence[int]
+    action_dim: int
+    dropout_rate: Optional[float] = None
+    low: Optional[jnp.ndarray] = None
+    high: Optional[jnp.ndarray] = None
+
+    @nn.compact
+    def __call__(self, observations, training=False):
+        x = MLP(
+            self.hidden_dims,
+            activate_final=True,
+            dropout_rate=self.dropout_rate,
+        )(observations, training=training)
+
+        mean = nn.Dense(
+            self.action_dim,
+            kernel_init=default_init(1e-2),
+        )(x)
+
+        # Deterministic tanh
+        action = jnp.tanh(mean)
+
+        if self.low is not None and self.high is not None:
+            action = (action + 1.0) / 2.0
+            action = action * (self.high - self.low) + self.low
+
+        return distrax.Independent(
+            distrax.Deterministic(action),
+            reinterpreted_batch_ndims=1,
+        )
