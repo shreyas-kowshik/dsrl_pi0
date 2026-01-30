@@ -1,0 +1,67 @@
+#!/bin/bash
+#SBATCH --job-name=residual_sac_pi0      # Job name
+#SBATCH --nodes=1                          # Number of nodes
+#SBATCH --gres=gpu:1                       # GPUs per node
+#SBATCH --cpus-per-task=12                 # CPU cores per task
+#SBATCH --mem=128G                         # Memory per node
+#SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
+#SBATCH --partition=general                # Partition/queue name
+#SBATCH --output=/data/user_data/sreyasv/dsrl_logs/logs/residual_sac_libero_pi0_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/sreyasv/dsrl_logs/logs/residual_sac_libero_pi0_%x_%j.err    # Stderr log
+
+# -------------------------------
+# Environment setup
+# -------------------------------
+source /home/sreyasv/miniconda3/etc/profile.d/conda.sh
+conda activate dsrl_pi0
+
+mkdir -p /data/user_data/sreyasv/dsrl_logs/logs/
+
+# -------------------------------
+# Configuration
+# -------------------------------
+proj_name=Residual_SAC_Libero-new
+device_id=0
+
+export DISPLAY=:0
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl  
+export MUJOCO_EGL_DEVICE_ID=$device_id
+
+export OPENPI_DATA_HOME=/data/hf_cache/pi-models/openpi
+export EXP=/data/user_data/sreyasv/dsrl_exp/logs/$proj_name
+export CUDA_VISIBLE_DEVICES=$device_id
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+
+pip install mujoco==3.3.1
+
+# -------------------------------
+# Launch Residual SAC Training
+# -------------------------------
+# note current script will work only with chunk len and query freq being equal
+python -m examples.launch_train_sim_residual \
+    --algorithm residual_sac \
+    --env libero \
+    --prefix dsrl_residual_pi0_libero_put-both-moka-pots-on-stove_low_ent_clip_temp_true \
+    --wandb_project ${proj_name} \
+    --batch_size 256 \
+    --discount 0.999 \
+    --seed 0 \
+    --max_steps 500000 \
+    --eval_interval 10000 \
+    --log_interval 500 \
+    --checkpoint_interval 50000 \
+    --eval_episodes 10 \
+    --multi_grad_step 20 \
+    --start_online_updates 500 \
+    --resize_image 100 \
+    --action_magnitude 1.0 \
+    --query_freq 10 \
+    --hidden_dims 128 \
+    --pi_05_config pi0_libero_finetuned \
+    --pi_05_ckpt_dir gs://openpi-assets/checkpoints/pi0_libero \
+    --residual_alpha 0.1 \
+    --chunk_len 10 \
+    --use_zero_residual_initially 1 \
+    --target_entropy -105.0 \

@@ -17,7 +17,7 @@ conda activate dsrl_pi0     # use the correct env (adjust if it's 'seer' or some
 
 mkdir -p /data/user_data/sreyasv/dsrl_logs/logs/
 # -------------------------------
-proj_name=DSRL_pi05_Libero
+proj_name=DSRL_pi05_Libero_debug
 device_id=0
 
 export DISPLAY=:0

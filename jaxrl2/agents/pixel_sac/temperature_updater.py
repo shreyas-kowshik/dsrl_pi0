@@ -13,7 +13,8 @@ def update_temperature(
         temp_loss = temperature * (entropy - target_entropy).mean()
         return temp_loss, {
             'temperature': temperature,
-            'temperature_loss': temp_loss
+            'temperature_loss': temp_loss,
+            'entropy_error': (entropy - target_entropy).mean(),
         }
 
     grads, info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)

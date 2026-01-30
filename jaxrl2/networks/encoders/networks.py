@@ -1,5 +1,5 @@
 from typing import Dict, Optional, Sequence, Union
-
+import chex
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -41,7 +41,7 @@ class PixelMultiplexer(nn.Module):
     network: nn.Module
     latent_dim: int
     use_bottleneck: bool=True
-
+    pop_base_actions: bool=True
     @nn.compact
     def __call__(self,
                  observations: Union[FrozenDict, Dict],
@@ -56,6 +56,20 @@ class PixelMultiplexer(nn.Module):
             x = nn.tanh(x)
 
         x = observations.copy(add_or_replace={'pixels': x})
+        if 'base_action' in x and self.pop_base_actions:
+           x = FrozenDict({k: v for k, v in x.items() if k != 'base_action'})
+        elif 'base_action' in x:
+            base_action_raw = observations['base_action']
+
+            # chex.assert_rank(base_action_raw, 4)
+            # chex.assert_equal(base_action_raw.shape[-1], 1)
+
+            base_action = jnp.squeeze(base_action_raw, axis=-1)
+            base_action = base_action.reshape(
+                base_action.shape[0],
+                -1
+            ) #flatten time step and action dim
+            x = x.copy(add_or_replace={'base_action': base_action})
 
         # print('fully connected keys', x.keys())
         if actions is None:
