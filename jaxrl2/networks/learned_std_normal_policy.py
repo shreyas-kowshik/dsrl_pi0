@@ -32,42 +32,40 @@ class LearnedStdNormalPolicy(nn.Module):
         return distribution
 
 class TanhMultivariateNormalDiag(distrax.Transformed):
-
     def __init__(self,
                  loc: jnp.ndarray,
                  scale_diag: jnp.ndarray,
                  low: Optional[jnp.ndarray] = None,
                  high: Optional[jnp.ndarray] = None):
-        distribution = distrax.MultivariateNormalDiag(loc=loc,
-                                                      scale_diag=scale_diag)
+        
+        # Base distribution: Gaussian
+        distribution = distrax.MultivariateNormalDiag(loc=loc, scale_diag=scale_diag)
 
         layers = []
 
-        if not (low is None or high is None):
+        # 2. Rescale: [-1, 1] -> [low, high]
+        # This is mathematically identical to your manual rescale_from_tanh
+        if (low is not None) and (high is not None):
+            # Transformation: y = x * scale + shift
+            # Equivalent to: (x + 1) / 2 * (high - low) + low
+            scale = (high - low) / 2.0
+            shift = (high + low) / 2.0
+            
+            # ScalarAffine provides the inverse and log_det_jacobian automatically
+            rescale_bijector = distrax.ScalarAffine(shift=shift, scale=scale)
+            layers.append(distrax.Block(rescale_bijector, 1))
 
-            def rescale_from_tanh(x):
-                x = (x + 1) / 2  # (-1, 1) => (0, 1)
-                return x * (high - low) + low
-
-            def forward_log_det_jacobian(x):
-                high_ = jnp.broadcast_to(high, x.shape)
-                low_ = jnp.broadcast_to(low, x.shape)
-                return jnp.sum(jnp.log(0.5 * (high_ - low_)), -1)
-
-            layers.append(
-                distrax.Lambda(
-                    rescale_from_tanh,
-                    forward_log_det_jacobian=forward_log_det_jacobian,
-                    event_ndims_in=1,
-                    event_ndims_out=1))
-
+        # 1. Squash: Gaussian -> [-1, 1]
         layers.append(distrax.Block(distrax.Tanh(), 1))
 
+        # distrax.Chain applies the list in REVERSE order (Last element first).
+        # Execution flow: Sample -> Tanh (index 1) -> Rescale (index 0) -> Action
         bijector = distrax.Chain(layers)
 
         super().__init__(distribution=distribution, bijector=bijector)
 
     def mode(self) -> jnp.ndarray:
+        # Calculates the greedy action: Rescale(Tanh(Mean))
         return self.bijector.forward(self.distribution.mode())
 
 class LearnedStdTanhNormalPolicy(nn.Module):

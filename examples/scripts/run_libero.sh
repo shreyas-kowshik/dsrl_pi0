@@ -17,7 +17,7 @@ conda activate dsrl_pi0     # use the correct env (adjust if it's 'seer' or some
 
 mkdir -p /data/user_data/sreyasv/dsrl_logs/logs/
 # -------------------------------
-proj_name=DSRL_pi05_Libero_debug
+proj_name=DSRL_pi05_Libero
 device_id=0
 
 export DISPLAY=:0
@@ -44,7 +44,7 @@ python -m examples.launch_train_sim \
 --max_steps 500000  \
 --eval_interval 10000 \
 --log_interval 500 \
---checkpoint_interval 50000 \
+--checkpoint_interval 500000 \
 --eval_episodes 10 \
 --multi_grad_step 20 \
 --start_online_updates 500 \

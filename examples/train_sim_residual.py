@@ -1,10 +1,15 @@
 #! /usr/bin/env python
-"""Main training script for Residual SAC in simulation.
+"""Main training script for Residual RL in simulation.
 
-This script sets up the Residual SAC training pipeline where:
+This script sets up the Residual RL training pipeline where:
 - A frozen base policy (Pi-0.5) produces base action chunks
-- SAC predicts residual actions in environment action space
+- Residual policy predicts residual actions in environment action space
 - Executed actions are: a_exec = clip(base_action + alpha * delta, -1, 1)
+
+Supported algorithms:
+- 'residual_sac': SAC-style (maximize Q - alpha * log_prob)
+- 'q_weighted_pg': Q-weighted Policy Gradient with PPO clipping (raw Q as advantage)
+- 'residual_grpo': GRPO with PPO clipping (Q - mean(Q) as advantage)
 """
 
 import os
@@ -18,6 +23,7 @@ import copy
 
 import jax
 from jaxrl2.agents.pixel_sac.pixel_sac_residual_learner import PixelSACResidualLearner
+from jaxrl2.agents.pixel_sac.pixel_ppo_residual_learner import PixelPPOResidualLearner
 from jaxrl2.utils.general_utils import add_batch_dim
 import numpy as np
 
@@ -215,9 +221,31 @@ def main_residual(variant):
     # Add residual_alpha to kwargs for the learner
     kwargs['residual_alpha'] = variant.residual_alpha
     
-    # Create Residual SAC agent
-    agent = PixelSACResidualLearner(variant.seed, sample_obs, sample_action, **kwargs)
-    print(f"Initialized Residual SAC with alpha={variant.residual_alpha}")
+    # Get algorithm selection
+    algo = variant.get('algo', 'residual_sac')
+    
+    # Create Residual RL agent based on algorithm
+    if algo == 'residual_sac':
+        # SAC learner
+        agent = PixelSACResidualLearner(variant.seed, sample_obs, sample_action, **kwargs)
+        print(f"Initialized Residual SAC with alpha={variant.residual_alpha}")
+    elif algo in ['q_weighted_pg', 'residual_grpo']:
+        # PPO/GRPO learner
+        ppo_kwargs = {k: v for k, v in kwargs.items() if k not in ['temp_lr', 'init_temperature', 'backup_entropy', 'clip_temp', 'clip_min_temp', 'clip_max_temp', 'target_entropy']}
+        ppo_kwargs['algo'] = algo
+        ppo_kwargs['actor_tau'] = variant.get('actor_tau', 0.005)
+        ppo_kwargs['grpo_num_samples'] = variant.get('grpo_num_samples', 8)
+        ppo_kwargs['clip_epsilon'] = variant.get('clip_epsilon', 0.2)
+        ppo_kwargs['clip_min_epsilon_multiplier'] = variant.get('clip_min_epsilon_multiplier', 1.0)
+        ppo_kwargs['clip_max_epsilon_multiplier'] = variant.get('clip_max_epsilon_multiplier', 1.0)
+        ppo_kwargs['entropy_coeff'] = variant.get('entropy_coeff', 0.0)
+        ppo_kwargs['advantage_critic_reduction'] = variant.get('advantage_critic_reduction', 'mean')
+        ppo_kwargs['adv_clip_min'] = variant.get('adv_clip_min', None)
+        ppo_kwargs['adv_clip_max'] = variant.get('adv_clip_max', None)
+        agent = PixelPPOResidualLearner(variant.seed, sample_obs, sample_action, **ppo_kwargs)
+        print(f"Initialized Residual {algo.upper()} with alpha={variant.residual_alpha}")
+    else:
+        raise ValueError(f"Unknown algorithm: {algo}")
 
     # Replay buffer
     online_buffer_size = variant.max_steps // variant.multi_grad_step
