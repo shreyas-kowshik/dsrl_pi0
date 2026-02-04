@@ -32,6 +32,64 @@ from openpi.training import config as openpi_config
 from openpi.policies import policy_config
 from openpi.shared import download
 
+class PolicyWrapper:
+    """Wrapper to fix tokenized_prompt dimension issue.
+    
+    The openpi TokenizePrompt transform adds a batch dimension, and then
+    Policy.infer adds another batch dimension, resulting in shape [1,1,L]
+    instead of [1,L]. This wrapper squeezes the extra dimension.
+    """
+    def __init__(self, policy):
+        self._policy = policy
+    
+    def infer(self, obs, **kwargs):
+        result = self._policy.infer(obs, **kwargs)
+        return result
+    
+    def __getattr__(self, name):
+        return getattr(self._policy, name)
+
+# Monkey-patch the Policy class to fix tokenized_prompt dimension
+_original_policy_infer = None
+
+def _patched_infer(self, obs, **kwargs):
+    import jax.numpy as jnp
+    
+    # Store original _input_transform
+    original_input_transform = self._input_transform
+    
+    def fixed_input_transform(inputs):
+        result = original_input_transform(inputs)
+        # Squeeze the extra batch dimension from tokenized_prompt if it exists
+        if "tokenized_prompt" in result and result["tokenized_prompt"] is not None:
+            arr = result["tokenized_prompt"]
+            if hasattr(arr, 'ndim') and arr.ndim >= 2:
+                # Remove the first dimension added by TokenizePrompt
+                result["tokenized_prompt"] = arr[0] if arr.shape[0] == 1 else arr
+        if "tokenized_prompt_mask" in result and result["tokenized_prompt_mask"] is not None:
+            arr = result["tokenized_prompt_mask"]
+            if hasattr(arr, 'ndim') and arr.ndim >= 2:
+                result["tokenized_prompt_mask"] = arr[0] if arr.shape[0] == 1 else arr
+        return result
+    
+    # Temporarily replace _input_transform
+    self._input_transform = fixed_input_transform
+    try:
+        return _original_policy_infer(self, obs, **kwargs)
+    finally:
+        self._input_transform = original_input_transform
+
+def patch_openpi_policy():
+    """Apply the monkey-patch to fix tokenized_prompt dimensions."""
+    global _original_policy_infer
+    from openpi.policies import policy as _policy_module
+    if _original_policy_infer is None:
+        _original_policy_infer = _policy_module.Policy.infer
+        _policy_module.Policy.infer = _patched_infer
+
+# Apply the patch on import
+patch_openpi_policy()
+
 home_dir = os.environ['HOME']
 compilation_cache.initialize_cache(os.path.join(home_dir, 'jax_compilation_cache'))
 
