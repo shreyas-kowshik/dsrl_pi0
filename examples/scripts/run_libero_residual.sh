@@ -20,7 +20,7 @@ mkdir -p /data/user_data/sreyasv/dsrl_logs/logs/
 # -------------------------------
 # Configuration
 # -------------------------------
-proj_name=Residual_SAC_Libero-new
+proj_name=test-libero-residual-pi0
 device_id=0
 
 export DISPLAY=:0
@@ -43,7 +43,7 @@ pip install mujoco==3.3.1
 python -m examples.launch_train_sim_residual \
     --algorithm residual_sac \
     --env libero \
-    --prefix dsrl_residual_pi0_libero_put-both-moka-pots-on-stove_low_ent_clip_temp_true \
+    --prefix residual_pi5_2moka-pots-ckpt-corrected \
     --wandb_project ${proj_name} \
     --batch_size 256 \
     --discount 0.999 \
@@ -59,9 +59,13 @@ python -m examples.launch_train_sim_residual \
     --action_magnitude 1.0 \
     --query_freq 10 \
     --hidden_dims 128 \
-    --pi_05_config pi0_libero_finetuned \
-    --pi_05_ckpt_dir gs://openpi-assets/checkpoints/pi0_libero \
+    --pi_05_config pi05_libero_finetuned_two_moka_pots \
+    --pi_05_ckpt_dir /data/hf_cache/models/pi05_libero_ep5_mokapots_4k/ \
     --residual_alpha 0.1 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
     --target_entropy -105.0 \
+    --num_critic_updates 2 \
+    --num_actor_updates 4 \
+    --use_huber_loss 0 \
+    --huber_delta 1.0 \
