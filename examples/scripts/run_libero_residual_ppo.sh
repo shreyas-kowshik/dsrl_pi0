@@ -20,7 +20,7 @@ mkdir -p /data/user_data/sreyasv/qpg_logs/logs/
 # -------------------------------
 # Configuration
 # -------------------------------
-proj_name=libero-residual-q_weighted_pg
+proj_name=test-libero-residual-q_weighted_pg
 device_id=0
 
 export DISPLAY=:0
@@ -47,9 +47,9 @@ python -m examples.launch_train_sim_residual \
     --algorithm q_weighted_pg \
     --algo q_weighted_pg \
     --env libero \
-    --prefix residual_qpg-pi05-new_ckpt_mokaPots-4k-huber-loss \
+    --prefix residual_qpg-pi05-new_ckpt_mokaPots-4k-bc-sb\
     --wandb_project ${proj_name} \
-    --batch_size 256 \
+    --batch_size 32 \
     --discount 0.999 \
     --seed 0 \
     --max_steps 1000000 \
@@ -58,7 +58,7 @@ python -m examples.launch_train_sim_residual \
     --checkpoint_interval 500000 \
     --eval_episodes 10 \
     --multi_grad_step 20 \
-    --start_online_updates 500 \
+    --start_online_updates 50 \
     --resize_image 100 \
     --action_magnitude 1.0 \
     --query_freq 10 \
@@ -75,6 +75,10 @@ python -m examples.launch_train_sim_residual \
     --log_ratio_clip 20.0 \
     --log_prob_clip 50.0 \
     --max_grad_norm 1.0 \
-    --use_huber_loss 1 \
+    --use_huber_loss 0 \
     --num_critic_updates 2 \
-    --num_actor_updates 4
+    --num_actor_updates 4 \
+    --bc_reg_coeff 0.0 \
+    --bc_on_success_only 1 \
+    --success_buffer_ratio 0.2 \
+    --success_buffer_min_size 50

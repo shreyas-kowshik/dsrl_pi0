@@ -232,6 +232,8 @@ def main_residual(variant):
         kwargs['max_grad_norm'] = variant.get('max_grad_norm', 1.0)
         kwargs['num_critic_updates'] = variant.get('num_critic_updates', 1)
         kwargs['num_actor_updates'] = variant.get('num_actor_updates', 1)
+        kwargs['bc_reg_coeff'] = variant.get('bc_reg_coeff', 0.0)
+        kwargs['bc_on_success_only'] = variant.get('bc_on_success_only', False)
         agent = PixelSACResidualLearner(variant.seed, sample_obs, sample_action, **kwargs)
         print(f"Initialized Residual SAC with alpha={variant.residual_alpha}")
     elif algo in ['q_weighted_pg', 'residual_grpo']:
@@ -255,6 +257,8 @@ def main_residual(variant):
         # Update ratio control
         ppo_kwargs['num_critic_updates'] = variant.get('num_critic_updates', 2)
         ppo_kwargs['num_actor_updates'] = variant.get('num_actor_updates', 4)
+        ppo_kwargs['bc_reg_coeff'] = variant.get('bc_reg_coeff', 0.0)
+        ppo_kwargs['bc_on_success_only'] = variant.get('bc_on_success_only', False)
         agent = PixelPPOResidualLearner(variant.seed, sample_obs, sample_action, **ppo_kwargs)
         print(f"Initialized Residual {algo.upper()} with alpha={variant.residual_alpha}")
     else:
@@ -266,8 +270,22 @@ def main_residual(variant):
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
     
+    # Success replay buffer (stores only transitions from successful episodes)
+    success_buffer_ratio = variant.get('success_buffer_ratio', 0.0)
+    if success_buffer_ratio > 0.0:
+        # Smaller capacity since only success data goes here
+        success_buffer_size = max(10000, int(online_buffer_size * 0.5))
+        success_replay_buffer = ReplayBuffer(
+            dummy_env.observation_space, dummy_env.action_space, int(success_buffer_size)
+        )
+        success_replay_buffer.seed(variant.seed + 1)
+        print(f'Created success replay buffer with capacity {success_buffer_size}')
+    else:
+        success_replay_buffer = None
+    
     # Start training
     trajwise_alternating_training_loop_residual(
         variant, agent, env, eval_env, online_replay_buffer, replay_buffer, 
-        wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp
+        wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp,
+        success_replay_buffer=success_replay_buffer,
     )

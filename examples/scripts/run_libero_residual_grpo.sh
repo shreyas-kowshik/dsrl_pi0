@@ -78,4 +78,8 @@ python -m examples.launch_train_sim_residual \
     --max_grad_norm 1.0 \
     --use_huber_loss 0 \
     --num_critic_updates 2 \
-    --num_actor_updates 4
+    --num_actor_updates 4 \
+    --bc_reg_coeff 0.0 \
+    --bc_on_success_only 0 \
+    --success_buffer_ratio 0.0 \
+    --success_buffer_min_size 100

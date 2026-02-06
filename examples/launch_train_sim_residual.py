@@ -66,6 +66,14 @@ if __name__ == '__main__':
     # Update ratio control (new)
     parser.add_argument('--num_critic_updates', default=2, help='Number of critic updates per batch', type=int)
     parser.add_argument('--num_actor_updates', default=4, help='Number of actor updates per batch', type=int)
+    
+    # BC regularization parameters
+    parser.add_argument('--bc_reg_coeff', default=0.0, help='BC regularization coefficient (0 = disabled)', type=float)
+    parser.add_argument('--bc_on_success_only', default=0, help='BC loss only on success transitions (1=yes, 0=no)', type=int)
+    
+    # Success buffer parameters
+    parser.add_argument('--success_buffer_ratio', default=0.0, help='Fraction of actor batch from success buffer (0 = disabled, e.g. 0.2 for 20%%)', type=float)
+    parser.add_argument('--success_buffer_min_size', default=100, help='Min samples in success buffer before using it', type=int)
 
     # Default training kwargs
     train_args_dict = dict(
@@ -106,6 +114,7 @@ if __name__ == '__main__':
     variant['critic_pop_base_actions'] = bool(variant.get('critic_pop_base_actions', 0))
     variant['clip_temp'] = bool(variant.get('clip_temp', 1))
     variant['use_huber_loss'] = bool(variant.get('use_huber_loss', 0))
+    variant['bc_on_success_only'] = bool(variant.get('bc_on_success_only', 0))
     
     algo = variant.get('algo', 'residual_sac')
     print("=" * 60)
@@ -133,6 +142,11 @@ if __name__ == '__main__':
         print("  --- Update ratio ---")
         print(f"  num_critic_updates: {variant.get('num_critic_updates', 2)}")
         print(f"  num_actor_updates: {variant.get('num_actor_updates', 4)}")
+    print("  --- BC Regularization ---")
+    print(f"  bc_reg_coeff: {variant.get('bc_reg_coeff', 0.0)}")
+    print(f"  bc_on_success_only: {variant.get('bc_on_success_only', False)}")
+    print(f"  success_buffer_ratio: {variant.get('success_buffer_ratio', 0.0)}")
+    print(f"  success_buffer_min_size: {variant.get('success_buffer_min_size', 100)}")
     print("=" * 60)
     print(variant)
     

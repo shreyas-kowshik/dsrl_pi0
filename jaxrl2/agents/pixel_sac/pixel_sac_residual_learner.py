@@ -223,6 +223,7 @@ def _update_critic_jit(
     jax.jit,
     static_argnames=(
         'critic_reduction', 'color_jitter', 'num_cameras', 'query_frequency',
+        'bc_on_success_only', 'bc_flag',
     ),
 )
 def _update_actor_jit(
@@ -237,6 +238,9 @@ def _update_actor_jit(
     num_cameras: int,
     query_frequency: int,
     target_entropy: float,
+    bc_flag: bool,
+    bc_reg_coeff: float,
+    bc_on_success_only: bool,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Dict[str, float]]:
     """JIT-compiled actor + temperature update for Residual SAC."""
     aug_pixels = batch['observations']['pixels']
@@ -268,6 +272,9 @@ def _update_actor_jit(
         residual_alpha,
         query_frequency,
         critic_reduction=critic_reduction,
+        bc_flag=bc_flag,
+        bc_reg_coeff=bc_reg_coeff,
+        bc_on_success_only=bc_on_success_only,
     )
 
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
@@ -322,6 +329,8 @@ class PixelSACResidualLearner(Agent):
                  max_grad_norm: float = 1.0,
                  num_critic_updates: int = 1,
                  num_actor_updates: int = 1,
+                 bc_reg_coeff: float = 0.0,
+                 bc_on_success_only: bool = False,
                  ):
         """Initialize Residual SAC Learner.
         
@@ -378,6 +387,8 @@ class PixelSACResidualLearner(Agent):
         self.max_grad_norm = max_grad_norm
         self.num_critic_updates = num_critic_updates
         self.num_actor_updates = num_actor_updates
+        self.bc_reg_coeff = bc_reg_coeff
+        self.bc_on_success_only = bc_on_success_only
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
@@ -508,6 +519,8 @@ class PixelSACResidualLearner(Agent):
         print(f'  max_grad_norm: {self.max_grad_norm}')
         print(f'  num_critic_updates: {self.num_critic_updates}')
         print(f'  num_actor_updates: {self.num_actor_updates}')
+        print(f'  bc_reg_coeff: {self.bc_reg_coeff}')
+        print(f'  bc_on_success_only: {self.bc_on_success_only}')
 
     def update_critic(self, batch: FrozenDict) -> Dict[str, float]:
         """Perform a single critic update.
@@ -563,6 +576,9 @@ class PixelSACResidualLearner(Agent):
             self.num_cameras,
             self.query_frequency,
             self.target_entropy,
+            bool(self.bc_reg_coeff > 0.0 ),
+            self.bc_reg_coeff,
+            self.bc_on_success_only,
         )
         self._rng = new_rng
         self._actor = new_actor

@@ -20,7 +20,7 @@ mkdir -p /data/user_data/sreyasv/dsrl_logs/logs/
 # -------------------------------
 # Configuration
 # -------------------------------
-proj_name=test-libero-residual-pi0
+proj_name=libero-residual-sac
 device_id=0
 
 export DISPLAY=:0
@@ -43,7 +43,7 @@ pip install mujoco==3.3.1
 python -m examples.launch_train_sim_residual \
     --algorithm residual_sac \
     --env libero \
-    --prefix residual_pi5_2moka-pots-ckpt-corrected \
+    --prefix residual_pi5_2moka-pots-ckpt-crct-bc-sb-ra-0.5 \
     --wandb_project ${proj_name} \
     --batch_size 256 \
     --discount 0.999 \
@@ -61,7 +61,7 @@ python -m examples.launch_train_sim_residual \
     --hidden_dims 128 \
     --pi_05_config pi05_libero_finetuned_two_moka_pots \
     --pi_05_ckpt_dir /data/hf_cache/models/pi05_libero_ep5_mokapots_4k/ \
-    --residual_alpha 0.1 \
+    --residual_alpha 0.5 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
     --target_entropy -105.0 \
@@ -69,3 +69,7 @@ python -m examples.launch_train_sim_residual \
     --num_actor_updates 4 \
     --use_huber_loss 0 \
     --huber_delta 1.0 \
+    --bc_reg_coeff 0.2 \
+    --bc_on_success_only 1 \
+    --success_buffer_ratio 0.2 \
+    --success_buffer_min_size 300

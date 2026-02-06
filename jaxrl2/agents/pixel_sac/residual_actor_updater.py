@@ -39,7 +39,11 @@ def update_actor_residual(
         residual_alpha: float,
         query_frequency: int,
         cross_norm: bool = False, 
-        critic_reduction: str = 'min') -> Tuple[TrainState, Dict[str, float]]:
+        critic_reduction: str = 'min',
+        bc_flag: bool = False,
+        bc_reg_coeff: float = 0.0,
+        bc_on_success_only: bool = False,
+) -> Tuple[TrainState, Dict[str, float]]:
     """Update actor for Residual SAC.
     
     Args:
@@ -138,7 +142,17 @@ def update_actor_residual(
         
         # Actor loss: maximize Q, minimize entropy cost
         alpha_val = temp.apply_fn({'params': temp.params})
-        actor_loss = (alpha_val * log_probs - q).mean()
+        rl_loss = (alpha_val * log_probs - q).mean()
+        
+        # BC regularization loss (stored-action NLL)
+        bc_loss_val = jnp.array(0.0)
+        bc_info = {}
+        if bc_flag:
+            bc_loss_val, bc_info = compute_bc_loss_residual(
+                dist, batch, query_frequency, bc_on_success_only
+            )
+        
+        actor_loss = rl_loss + bc_reg_coeff * bc_loss_val
         
 
         # Compute residual-specific metrics
@@ -212,7 +226,10 @@ def update_actor_residual(
             'collapse/cos_base_exec_change_mean': cos_base_exec_change.mean(),
             'collapse/alpha_temp': alpha_val,
             'collapse/alpha_logp_mean': (alpha_val * log_probs).mean(),
-
+            'actor/rl_loss': rl_loss,
+            'bc/reg_coeff': bc_reg_coeff,
+            'bc/weighted_loss': bc_reg_coeff * bc_loss_val,
+            **bc_info,
         }
         return actor_loss, (things_to_log, new_model_state)
 
@@ -224,6 +241,65 @@ def update_actor_residual(
         new_actor = actor.apply_gradients(grads=grads)
 
     return new_actor, info
+
+
+def compute_bc_loss_residual(
+        dist,
+        batch: DatasetDict,
+        query_frequency: int,
+        bc_on_success_only: bool = False,
+) -> Tuple[jnp.ndarray, Dict[str, float]]:
+    """Compute BC regularization loss (negative log-likelihood of stored actions).
+    
+    Encourages the actor to reproduce the stored delta (residual) actions from
+    the replay buffer, which are the actions that led to the observed transitions.
+    When bc_on_success_only=True, the loss is computed only on transitions from
+    successful episodes (using the success_flag in the batch).
+    
+    This function is meant to be called INSIDE actor_loss_fn, using the `dist`
+    already constructed from the candidate actor_params being differentiated.
+    
+    Args:
+        dist: The current policy distribution (from actor forward pass on batch obs).
+        batch: Batch of transitions containing:
+            - actions: (B, query_frequency, action_dim) stored delta actions
+            - success_flag: (B,) binary flag (1.0 = success episode, 0.0 = failure)
+        query_frequency: Chunk length.
+        bc_on_success_only: If True, only compute BC loss on success transitions.
+        
+    Returns:
+        bc_loss: Scalar BC loss (mean NLL, possibly masked).
+        info: Dict with BC diagnostics.
+    """
+    # Stored delta actions: (B, query_frequency, action_dim) -> flatten to (B, query_freq * action_dim)
+    stored_actions = batch['actions']  # (B, query_frequency, action_dim)
+    B = stored_actions.shape[0]
+    stored_actions_flat = stored_actions.reshape(B, -1)  # (B, query_freq * action_dim)
+    
+    # NLL of stored actions under current policy
+    log_probs = dist.log_prob(stored_actions_flat)  # (B,)
+    nll = -log_probs  # (B,)
+    
+    if bc_on_success_only:
+        # Mask: only include transitions from successful episodes
+        success_mask = batch['success_flag']  # (B,)
+        num_success = jnp.sum(success_mask) + 1e-8  # avoid div by zero
+        bc_loss = jnp.sum(nll * success_mask) / num_success
+        bc_frac = jnp.mean(success_mask)
+    else:
+        bc_loss = jnp.mean(nll)
+        bc_frac = 1.0
+    
+    info = {
+        'bc/loss': bc_loss,
+        'bc/nll_mean': jnp.mean(nll),
+        'bc/nll_max': jnp.max(nll),
+        'bc/nll_min': jnp.min(nll),
+        'bc/log_prob_mean': jnp.mean(log_probs),
+        'bc/success_frac_in_batch': bc_frac,
+    }
+    
+    return bc_loss, info
 
 
 def _nan_to_num_tree(tree):
@@ -253,6 +329,9 @@ def update_actor_residual_ppo(
         adv_clip_max: Optional[float] = None,
         log_ratio_clip: float = 20.0,
         log_prob_clip: float = 50.0,
+        bc_flag: bool = False,
+        bc_reg_coeff: float = 0.0,
+        bc_on_success_only: bool = False,
 ) -> Tuple[TrainState, Dict[str, float]]:
     """Update actor for Residual Q-weighted PG / GRPO.
     
@@ -402,7 +481,15 @@ def update_actor_residual_ppo(
         mean_entropy = base_entropy.mean()
         entropy_loss = -entropy_coeff * mean_entropy
         
-        actor_loss = pg_loss + entropy_loss
+        # BC regularization loss (stored-action NLL)
+        bc_loss_val = jnp.array(0.0)
+        bc_info = {}
+        if bc_flag:
+            bc_loss_val, bc_info = compute_bc_loss_residual(
+                dist, batch, query_frequency, bc_on_success_only
+            )
+        
+        actor_loss = pg_loss + entropy_loss + bc_reg_coeff * bc_loss_val
         
         # Logging - get distribution parameters
         mean_dist = dist.distribution._loc
@@ -468,6 +555,11 @@ def update_actor_residual_ppo(
             # GRPO stats
             'grpo/num_samples': float(G),
             'grpo/q_group_std': jnp.std(q_values, axis=0).mean(),
+            # BC regularization
+            'actor/rl_loss': pg_loss + entropy_loss,
+            'bc/reg_coeff': bc_reg_coeff,
+            'bc/weighted_loss': bc_reg_coeff * bc_loss_val,
+            **bc_info,
         }
         
         return actor_loss, (info, new_model_state)

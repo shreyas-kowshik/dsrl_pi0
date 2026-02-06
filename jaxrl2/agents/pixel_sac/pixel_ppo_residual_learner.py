@@ -130,6 +130,7 @@ def _update_critic_jit(
     'clip_epsilon', 'clip_min_epsilon_multiplier', 'clip_max_epsilon_multiplier',
     'entropy_coeff', 'advantage_critic_reduction', 'use_grpo_baseline',
     'adv_clip_min', 'adv_clip_max', 'log_ratio_clip', 'log_prob_clip',
+    'bc_on_success_only','bc_flag',
 ))
 def _update_actor_jit(
     rng: PRNGKey,
@@ -154,6 +155,9 @@ def _update_actor_jit(
     adv_clip_max: Optional[float],
     log_ratio_clip: float,
     log_prob_clip: float,
+    bc_flag: bool,
+    bc_reg_coeff: float,
+    bc_on_success_only: bool,
 ) -> Tuple[PRNGKey, TrainState, Dict[str, float]]:
     """JIT-compiled actor update function (no target actor - uses stop_gradient)."""
     
@@ -194,122 +198,12 @@ def _update_actor_jit(
         adv_clip_max=adv_clip_max,
         log_ratio_clip=log_ratio_clip,
         log_prob_clip=log_prob_clip,
+        bc_flag=bc_flag, 
+        bc_reg_coeff=bc_reg_coeff,
+        bc_on_success_only=bc_on_success_only,
     )
     
     return rng, new_actor, actor_info
-
-
-# Keep the old combined update for backward compatibility but it's no longer used
-@functools.partial(jax.jit, static_argnames=(
-    'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
-    'query_frequency', 'action_dim', 'grpo_num_samples', 'advantage_critic_reduction',
-    'use_grpo_baseline',
-))
-def _update_residual_ppo_jit(
-    rng: PRNGKey,
-    actor: TrainState,
-    target_actor_params: Params,
-    critic: TrainState,
-    target_critic_params: Params,
-    batch: DatasetDict,
-    discount: float,
-    tau: float,
-    actor_tau: float,
-    residual_alpha: float,
-    critic_reduction: str,
-    color_jitter: bool,
-    aug_next: bool,
-    num_cameras: int,
-    query_frequency: int,
-    action_dim: int,
-    grpo_num_samples: int,
-    clip_epsilon: float,
-    clip_min_epsilon_multiplier: float,
-    clip_max_epsilon_multiplier: float,
-    entropy_coeff: float,
-    advantage_critic_reduction: str,
-    use_grpo_baseline: bool,
-    adv_clip_min: Optional[float],
-    adv_clip_max: Optional[float],
-) -> Tuple[PRNGKey, TrainState, Params, TrainState, Params, Dict[str, float]]:
-    """JIT-compiled update function for Residual PPO/GRPO."""
-    
-    # Data augmentation for pixels
-    aug_pixels = batch['observations']['pixels']
-    aug_next_pixels = batch['next_observations']['pixels']
-    
-    if batch['observations']['pixels'].squeeze().ndim != 2:
-        rng, key = jax.random.split(rng)
-        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
-
-        if color_jitter:
-            rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
-                        (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-                    )
-            else:
-                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-
-    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
-    batch = batch.copy(add_or_replace={'observations': observations})
-
-    key, rng = jax.random.split(rng)
-    if aug_next:
-        rng, key = jax.random.split(rng)
-        aug_next_pixels = batched_random_crop(key, batch['next_observations']['pixels'])
-        if color_jitter:
-            rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_next_pixels = aug_next_pixels.at[:, :, :, i*3:(i+1)*3].set(
-                        (color_transform(key, aug_next_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-                    )
-            else:
-                aug_next_pixels = (color_transform(key, aug_next_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-        next_observations = batch['next_observations'].copy(add_or_replace={'pixels': aug_next_pixels})
-        batch = batch.copy(add_or_replace={'next_observations': next_observations})
-    
-    # Critic update (online TD learning, same as SAC)
-    key, rng = jax.random.split(rng)
-    target_critic = critic.replace(params=target_critic_params)
-    # Note: For critic update, we use current actor (not target) to sample next actions
-    # PPO doesn't use temperature for critic backup
-    temp_dummy = None
-    new_critic, critic_info = update_critic_residual(
-        key, actor, critic, target_critic, temp_dummy, batch,
-        discount, residual_alpha, query_frequency,
-        critic_reduction=critic_reduction, backup_entropy=False,
-    )
-    new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
-    
-    # Actor update with PPO/GRPO
-    key, rng = jax.random.split(rng)
-    target_actor = actor.replace(params=target_actor_params)
-    target_critic_for_actor = critic.replace(params=target_critic_params)
-    new_actor, actor_info = update_actor_residual_ppo(
-        key, actor, target_actor, target_critic_for_actor, batch,
-        residual_alpha, query_frequency, action_dim,
-        grpo_num_samples=grpo_num_samples,
-        clip_epsilon=clip_epsilon,
-        clip_min_epsilon_multiplier=clip_min_epsilon_multiplier,
-        clip_max_epsilon_multiplier=clip_max_epsilon_multiplier,
-        entropy_coeff=entropy_coeff,
-        advantage_critic_reduction=advantage_critic_reduction,
-        use_grpo_baseline=use_grpo_baseline,
-        adv_clip_min=adv_clip_min,
-        adv_clip_max=adv_clip_max,
-    )
-    
-    # Target actor update
-    new_target_actor_params = soft_target_update(new_actor.params, target_actor_params, actor_tau)
-
-    return rng, new_actor, new_target_actor_params, new_critic, new_target_critic_params, {
-        **critic_info,
-        **actor_info,
-    }
-
 
 class PixelPPOResidualLearner(Agent):
     """Residual Q-weighted PG / GRPO Learner for pixel observations.
@@ -373,6 +267,9 @@ class PixelPPOResidualLearner(Agent):
         # Update ratio control (applied in training loop, not here)
         num_critic_updates: int = 2,
         num_actor_updates: int = 4,
+        # BC regularization
+        bc_reg_coeff: float = 0.0,
+        bc_on_success_only: bool = False,
         # Other
         decay_steps: Optional[int] = None,
         cnn_features: Sequence[int] = (32, 64, 128, 256),
@@ -543,6 +440,10 @@ class PixelPPOResidualLearner(Agent):
         # Update ratio control
         self.num_critic_updates = num_critic_updates
         self.num_actor_updates = num_actor_updates
+        
+        # BC regularization
+        self.bc_reg_coeff = bc_reg_coeff
+        self.bc_on_success_only = bc_on_success_only
 
         if algo == 'q_weighted_pg':
             assert grpo_num_samples >= 1
@@ -571,6 +472,8 @@ class PixelPPOResidualLearner(Agent):
         print(f'  huber_delta: {self.huber_delta}')
         print(f'  num_critic_updates: {self.num_critic_updates}')
         print(f'  num_actor_updates: {self.num_actor_updates}')
+        print(f'  bc_reg_coeff: {self.bc_reg_coeff}')
+        print(f'  bc_on_success_only: {self.bc_on_success_only}')
 
     def update_critic(self, batch: FrozenDict) -> Dict[str, float]:
         """Perform a single critic update.
@@ -635,6 +538,9 @@ class PixelPPOResidualLearner(Agent):
             self.adv_clip_max,
             self.log_ratio_clip,
             self.log_prob_clip,
+            bool(self.bc_reg_coeff > 0.0),
+            self.bc_reg_coeff,
+            self.bc_on_success_only,
         )
         self._rng = new_rng
         self._actor = new_actor

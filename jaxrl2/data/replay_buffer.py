@@ -41,6 +41,7 @@ class ReplayBuffer(Dataset):
         rewards = np.empty((self.capacity, ), dtype=np.float32)
         masks = np.empty((self.capacity, ), dtype=np.float32)
         discount = np.empty((self.capacity, ), dtype=np.float32)
+        success_flag = np.zeros((self.capacity, ), dtype=np.float32)
 
         self.data = {
             'observations': observations,
@@ -50,6 +51,7 @@ class ReplayBuffer(Dataset):
             'rewards': rewards,
             'masks': masks,
             'discount': discount,
+            'success_flag': success_flag,
         }
 
         self.size = 0
@@ -122,6 +124,7 @@ class ReplayBuffer(Dataset):
             rewards = np.empty((self.capacity, ), dtype=np.float32)
             masks = np.empty((self.capacity, ), dtype=np.float32)
             discount = np.empty((self.capacity, ), dtype=np.float32)
+            success_flag = np.zeros((self.capacity, ), dtype=np.float32)
 
             data_new = {
                 'observations': observations,
@@ -131,6 +134,7 @@ class ReplayBuffer(Dataset):
                 'rewards': rewards,
                 'masks': masks,
                 'discount': discount,
+                'success_flag': success_flag,
             }
 
             for x in data_new:

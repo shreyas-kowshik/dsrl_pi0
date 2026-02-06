@@ -16,6 +16,8 @@ import jax
 from openpi_client import image_tools
 import math
 import PIL
+from jaxrl2.data.dataset import concat_recursive
+from flax.core import frozen_dict
 
 
 def _quat2axisangle(quat):
@@ -104,9 +106,60 @@ def obs_to_qpos(obs, variant):
     return qpos
 
 
+def _sample_actor_batch(
+    replay_buffer, success_replay_buffer,
+    batch_size, success_buffer_ratio,
+    success_buffer_min_size, use_success_buffer,
+    shard_fn=None,
+):
+    """Sample a batch for actor updates, optionally mixing in success buffer data.
+    
+    If success buffer is enabled and has enough data, composes the batch as:
+        - (1 - success_buffer_ratio) * batch_size samples from main buffer
+        - success_buffer_ratio * batch_size samples from success buffer
+    Otherwise, samples entirely from the main buffer.
+    
+    Args:
+        replay_buffer: Main replay buffer (all data).
+        success_replay_buffer: Success-only replay buffer (may be None).
+        batch_size: Total batch size.
+        success_buffer_ratio: Fraction of batch from success buffer (e.g., 0.2).
+        success_buffer_min_size: Minimum samples in success buffer before using it.
+        use_success_buffer: Whether success buffer mixing is enabled.
+        shard_fn: Optional function to shard batch across devices.
+        
+    Returns:
+        FrozenDict batch for actor update.
+    """
+    # Check if success buffer is ready
+    success_buffer_ready = (
+        use_success_buffer
+        and success_replay_buffer is not None
+        and len(success_replay_buffer) >= success_buffer_min_size
+    )
+    
+    if success_buffer_ready:
+        success_batch_size = max(1, int(batch_size * success_buffer_ratio))
+        main_batch_size = batch_size - success_batch_size
+        
+        main_batch = replay_buffer.sample(main_batch_size)
+        success_batch = success_replay_buffer.sample(success_batch_size)
+        
+        # Concatenate: concat_recursive handles nested dicts
+        mixed = concat_recursive([main_batch, success_batch])
+        batch = frozen_dict.freeze(mixed)
+    else:
+        batch = replay_buffer.sample(batch_size)
+    
+    if shard_fn is not None:
+        batch = shard_fn(batch)
+    
+    return batch
+
+
 def trajwise_alternating_training_loop_residual(
     variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger,
-    perform_control_evals=True, shard_fn=None, agent_dp=None
+    perform_control_evals=True, shard_fn=None, agent_dp=None, success_replay_buffer=None
 ):
     """Main training loop for Residual SAC.
     
@@ -121,10 +174,24 @@ def trajwise_alternating_training_loop_residual(
         perform_control_evals: Whether to run policy evaluations.
         shard_fn: Function to shard batches across devices.
         agent_dp: Frozen base policy (Pi-0.5 / Pi-0).
+        success_replay_buffer: Optional separate buffer for successful trajectories.
     """
     replay_buffer_iterator = replay_buffer.get_iterator(variant.batch_size)
     if shard_fn is not None:
         replay_buffer_iterator = map(shard_fn, replay_buffer_iterator)
+
+    # Success buffer configuration
+    success_buffer_ratio = variant.get('success_buffer_ratio', 0.0)
+    success_buffer_min_size = variant.get('success_buffer_min_size', 100)
+    use_success_buffer = (success_replay_buffer is not None and success_buffer_ratio > 0.0)
+    
+    if use_success_buffer:
+        # Compute split sizes for mixed actor batches
+        success_batch_size = max(1, int(variant.batch_size * success_buffer_ratio))
+        main_batch_size = variant.batch_size - success_batch_size
+        print(f'[Success Buffer] Enabled: ratio={success_buffer_ratio}, '
+              f'main_batch={main_batch_size}, success_batch={success_batch_size}, '
+              f'min_size={success_buffer_min_size}')
 
     total_env_steps = 0
     i = 0
@@ -136,10 +203,12 @@ def trajwise_alternating_training_loop_residual(
         while i <= variant.max_steps:
             traj = collect_traj_residual(variant, agent, env, i, agent_dp)
             traj_id = online_replay_buffer._traj_counter
-            add_online_data_to_buffer_residual(variant, traj, online_replay_buffer)
+            add_online_data_to_buffer_residual(variant, traj, online_replay_buffer, success_replay_buffer)
             total_env_steps += traj['env_steps']
             print('online buffer timesteps length:', len(online_replay_buffer))
             print('online buffer num traj:', traj_id + 1)
+            if success_replay_buffer is not None:
+                print('success buffer timesteps length:', len(success_replay_buffer))
             print('total env steps:', total_env_steps)
             
             if variant.get("num_online_gradsteps_batch", -1) > 0:
@@ -162,16 +231,23 @@ def trajwise_alternating_training_loop_residual(
 
                 for _ in tqdm(range(num_gradsteps), desc='gradsteps', leave=False):
                     # Critic updates: num_critic_updates per gradient step
+                    # Critic uses ONLY the main buffer (no success buffer mixing)
                     critic_info = {}
                     for _ in range(num_critic_updates):
                         batch = next(replay_buffer_iterator)
                         critic_info = agent.update_critic(batch)
 
                     # Actor updates: num_actor_updates per gradient step
+                    # Actor uses mixed batch (main + success buffer) when available
                     actor_info = {}
                     for _ in range(num_actor_updates):
-                        batch = next(replay_buffer_iterator)
-                        actor_info = agent.update_actor(batch)
+                        actor_batch = _sample_actor_batch(
+                            replay_buffer, success_replay_buffer,
+                            variant.batch_size, success_buffer_ratio,
+                            success_buffer_min_size, use_success_buffer,
+                            shard_fn,
+                        )
+                        actor_info = agent.update_actor(actor_batch)
 
                     # Combine info for logging
                     update_info = {**critic_info, **actor_info}
@@ -195,6 +271,12 @@ def trajwise_alternating_training_loop_residual(
                         
                         wandb_logger.log({
                             'replay_buffer_size': len(online_replay_buffer),
+                            'success_buffer_size': len(success_replay_buffer) if success_replay_buffer is not None else 0,
+                            'success_buffer_active': float(
+                                use_success_buffer 
+                                and success_replay_buffer is not None 
+                                and len(success_replay_buffer) >= success_buffer_min_size
+                            ),
                             'episode_return (exploration)': traj['episode_return'],
                             'is_success (exploration)': int(traj['is_success']),
                         }, i)
@@ -212,13 +294,17 @@ def trajwise_alternating_training_loop_residual(
                         agent.save_checkpoint(variant.outputdir, i, variant.checkpoint_interval)
 
 
-def add_online_data_to_buffer_residual(variant, traj, online_replay_buffer):
+def add_online_data_to_buffer_residual(variant, traj, online_replay_buffer, success_replay_buffer=None):
     """Add collected trajectory to replay buffer for Residual SAC.
     
     Stores:
         - observations with 'base_action' (chunk from frozen policy)
         - actions = delta_actions (residual)
         - rewards, masks, discount
+        - success_flag: 1.0 if this episode was successful, 0.0 otherwise
+    
+    If success_replay_buffer is provided and the trajectory was successful,
+    transitions are also added to the success buffer.
     """
     discount_horizon = variant.query_freq
     actions = np.array(traj['actions'])  # (B, query_freq, action_dim) - these are delta actions
@@ -226,6 +312,7 @@ def add_online_data_to_buffer_residual(variant, traj, online_replay_buffer):
     episode_len = len(actions)
     rewards = np.array(traj['rewards'])
     masks = np.array(traj['masks'])
+    is_success = float(traj['is_success'])
 
     for t in range(episode_len):
         obs = traj['observations'][t]
@@ -254,10 +341,18 @@ def add_online_data_to_buffer_residual(variant, traj, online_replay_buffer):
             next_actions=actions[t + 1] if t < episode_len - 1 else actions[t],
             rewards=rewards[t],
             masks=masks[t],
-            discount=variant.discount ** discount_horizon
+            discount=variant.discount ** discount_horizon,
+            success_flag=is_success,
         )
         online_replay_buffer.insert(insert_dict)
+        
+        # Also insert into success buffer if trajectory was successful
+        if success_replay_buffer is not None and is_success > 0.5:
+            success_replay_buffer.insert(insert_dict)
+    
     online_replay_buffer.increment_traj_counter()
+    if success_replay_buffer is not None and is_success > 0.5:
+        success_replay_buffer.increment_traj_counter()
 
 
 def collect_traj_residual(variant, agent, env, i, agent_dp=None):
