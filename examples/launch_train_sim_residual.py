@@ -46,15 +46,26 @@ if __name__ == '__main__':
     parser.add_argument('--algo', default='residual_sac', help='Algorithm: residual_sac, q_weighted_pg, residual_grpo', type=str)
     
     # PPO/GRPO specific parameters (adv_clip_min/max for clipping advantages)
-    parser.add_argument('--actor_tau', default=0.005, help='Target actor soft update rate (for PPO/GRPO)', type=float)
+    parser.add_argument('--actor_tau', default=0.005, help='[DEPRECATED] Target actor soft update rate (not used anymore)', type=float)
     parser.add_argument('--grpo_num_samples', default=8, help='Number of action samples per state for GRPO', type=int)
     parser.add_argument('--clip_epsilon', default=0.2, help='PPO clip epsilon', type=float)
     parser.add_argument('--clip_min_epsilon_multiplier', default=1.0, help='Multiplier for lower bound of PPO clip', type=float)
     parser.add_argument('--clip_max_epsilon_multiplier', default=1.0, help='Multiplier for upper bound of PPO clip', type=float)
-    parser.add_argument('--entropy_coeff', default=0.0, help='Entropy bonus coefficient (for PPO/GRPO)', type=float)
+    parser.add_argument('--entropy_coeff', default=1e-3, help='Entropy bonus coefficient (for PPO/GRPO)', type=float)
     parser.add_argument('--advantage_critic_reduction', default='mean', help='How to reduce Q ensemble for advantages (min, mean)', type=str)
     parser.add_argument('--adv_clip_min', default=None, help='Optional lower bound for advantage clipping', type=float)
     parser.add_argument('--adv_clip_max', default=None, help='Optional upper bound for advantage clipping', type=float)
+    
+    # Stability parameters (new)
+    parser.add_argument('--log_ratio_clip', default=20.0, help='Clamp log_ratio to [-clip, clip] before exp', type=float)
+    parser.add_argument('--log_prob_clip', default=50.0, help='Clamp log_probs to [-clip, clip]', type=float)
+    parser.add_argument('--max_grad_norm', default=1.0, help='Max gradient norm for clipping', type=float)
+    parser.add_argument('--use_huber_loss', default=0, help='Use Huber loss for critic (1=yes, 0=no)', type=int)
+    parser.add_argument('--huber_delta', default=1.0, help='Delta parameter for Huber loss', type=float)
+    
+    # Update ratio control (new)
+    parser.add_argument('--num_critic_updates', default=2, help='Number of critic updates per batch', type=int)
+    parser.add_argument('--num_actor_updates', default=4, help='Number of actor updates per batch', type=int)
 
     # Default training kwargs
     train_args_dict = dict(
@@ -94,6 +105,7 @@ if __name__ == '__main__':
     variant['backup_entropy'] = bool(variant.get('backup_entropy', 0))
     variant['critic_pop_base_actions'] = bool(variant.get('critic_pop_base_actions', 0))
     variant['clip_temp'] = bool(variant.get('clip_temp', 1))
+    variant['use_huber_loss'] = bool(variant.get('use_huber_loss', 0))
     
     algo = variant.get('algo', 'residual_sac')
     print("=" * 60)
@@ -104,15 +116,23 @@ if __name__ == '__main__':
     print(f"  chunk_len: {variant.get('chunk_len', 10)}")
     print(f"  use_zero_residual_initially: {variant.get('use_zero_residual_initially', True)}")
     if algo in ['q_weighted_pg', 'residual_grpo']:
-        print(f"  actor_tau: {variant.get('actor_tau', 0.005)}")
         print(f"  grpo_num_samples: {variant.get('grpo_num_samples', 8)}")
         print(f"  clip_epsilon: {variant.get('clip_epsilon', 0.2)}")
         print(f"  clip_min_epsilon_multiplier: {variant.get('clip_min_epsilon_multiplier', 1.0)}")
         print(f"  clip_max_epsilon_multiplier: {variant.get('clip_max_epsilon_multiplier', 1.0)}")
-        print(f"  entropy_coeff: {variant.get('entropy_coeff', 0.0)}")
+        print(f"  entropy_coeff: {variant.get('entropy_coeff', 1e-3)}")
         print(f"  advantage_critic_reduction: {variant.get('advantage_critic_reduction', 'mean')}")
         print(f"  adv_clip_min: {variant.get('adv_clip_min', None)}")
         print(f"  adv_clip_max: {variant.get('adv_clip_max', None)}")
+        print("  --- Stability parameters ---")
+        print(f"  log_ratio_clip: {variant.get('log_ratio_clip', 20.0)}")
+        print(f"  log_prob_clip: {variant.get('log_prob_clip', 50.0)}")
+        print(f"  max_grad_norm: {variant.get('max_grad_norm', 1.0)}")
+        print(f"  use_huber_loss: {variant.get('use_huber_loss', False)}")
+        print(f"  huber_delta: {variant.get('huber_delta', 1.0)}")
+        print("  --- Update ratio ---")
+        print(f"  num_critic_updates: {variant.get('num_critic_updates', 2)}")
+        print(f"  num_actor_updates: {variant.get('num_actor_updates', 4)}")
     print("=" * 60)
     print(variant)
     

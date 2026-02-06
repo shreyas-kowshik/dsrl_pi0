@@ -233,15 +233,23 @@ def main_residual(variant):
         # PPO/GRPO learner
         ppo_kwargs = {k: v for k, v in kwargs.items() if k not in ['temp_lr', 'init_temperature', 'backup_entropy', 'clip_temp', 'clip_min_temp', 'clip_max_temp', 'target_entropy']}
         ppo_kwargs['algo'] = algo
-        ppo_kwargs['actor_tau'] = variant.get('actor_tau', 0.005)
         ppo_kwargs['grpo_num_samples'] = variant.get('grpo_num_samples', 8)
         ppo_kwargs['clip_epsilon'] = variant.get('clip_epsilon', 0.2)
         ppo_kwargs['clip_min_epsilon_multiplier'] = variant.get('clip_min_epsilon_multiplier', 1.0)
         ppo_kwargs['clip_max_epsilon_multiplier'] = variant.get('clip_max_epsilon_multiplier', 1.0)
-        ppo_kwargs['entropy_coeff'] = variant.get('entropy_coeff', 0.0)
+        ppo_kwargs['entropy_coeff'] = variant.get('entropy_coeff', 1e-3)
         ppo_kwargs['advantage_critic_reduction'] = variant.get('advantage_critic_reduction', 'mean')
         ppo_kwargs['adv_clip_min'] = variant.get('adv_clip_min', None)
         ppo_kwargs['adv_clip_max'] = variant.get('adv_clip_max', None)
+        # Stability parameters
+        ppo_kwargs['log_ratio_clip'] = variant.get('log_ratio_clip', 20.0)
+        ppo_kwargs['log_prob_clip'] = variant.get('log_prob_clip', 50.0)
+        ppo_kwargs['max_grad_norm'] = variant.get('max_grad_norm', 1.0)
+        ppo_kwargs['use_huber_loss'] = variant.get('use_huber_loss', False)
+        ppo_kwargs['huber_delta'] = variant.get('huber_delta', 1.0)
+        # Update ratio control
+        ppo_kwargs['num_critic_updates'] = variant.get('num_critic_updates', 2)
+        ppo_kwargs['num_actor_updates'] = variant.get('num_actor_updates', 4)
         agent = PixelPPOResidualLearner(variant.seed, sample_obs, sample_action, **ppo_kwargs)
         print(f"Initialized Residual {algo.upper()} with alpha={variant.residual_alpha}")
     else:

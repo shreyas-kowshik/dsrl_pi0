@@ -29,7 +29,7 @@ export PYOPENGL_PLATFORM=egl
 export MUJOCO_EGL_DEVICE_ID=$device_id
 
 export OPENPI_DATA_HOME=/data/hf_cache/pi-models/openpi
-export EXP=/data/user_data/sreyasv/dsrl_exp/logs/$proj_name
+export EXP=/data/user_data/sreyasv/grpo_exp/logs/$proj_name
 export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
@@ -48,7 +48,7 @@ python -m examples.launch_train_sim_residual \
     --algorithm residual_grpo \
     --algo residual_grpo \
     --env libero \
-    --prefix residual_grpo_pi05-new_ckpt_mokaPots-4k-long-ra-0.1 \
+    --prefix residual_grpo_pi05-new_ckpt_mokaPots-4k-ra-1 \
     --wandb_project ${proj_name} \
     --batch_size 256 \
     --discount 0.999 \
@@ -66,11 +66,16 @@ python -m examples.launch_train_sim_residual \
     --hidden_dims 128 \
     --pi_05_config pi05_libero_finetuned_two_moka_pots \
     --pi_05_ckpt_dir /data/hf_cache/models/pi05_libero_ep5_mokapots_4k/ \
-    --residual_alpha 1.0 \
+    --residual_alpha 1 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
-    --actor_tau 0.005 \
     --grpo_num_samples 8 \
     --clip_epsilon 0.2 \
-    --entropy_coeff 0.0 \
-    --advantage_critic_reduction mean
+    --entropy_coeff 1e-3 \
+    --advantage_critic_reduction mean \
+    --log_ratio_clip 20.0 \
+    --log_prob_clip 50.0 \
+    --max_grad_norm 1.0 \
+    --use_huber_loss 0 \
+    --num_critic_updates 2 \
+    --num_actor_updates 4

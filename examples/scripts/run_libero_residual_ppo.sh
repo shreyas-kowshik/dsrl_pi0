@@ -47,12 +47,12 @@ python -m examples.launch_train_sim_residual \
     --algorithm q_weighted_pg \
     --algo q_weighted_pg \
     --env libero \
-    --prefix residual_qpg-pi05-new_ckpt_mokaPots-4k \
+    --prefix residual_qpg-pi05-new_ckpt_mokaPots-4k-huber-loss \
     --wandb_project ${proj_name} \
     --batch_size 256 \
     --discount 0.999 \
     --seed 0 \
-    --max_steps 500000 \
+    --max_steps 1000000 \
     --eval_interval 10000 \
     --log_interval 500 \
     --checkpoint_interval 500000 \
@@ -68,8 +68,13 @@ python -m examples.launch_train_sim_residual \
     --residual_alpha 0.1 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
-    --actor_tau 0.005 \
     --grpo_num_samples 8 \
     --clip_epsilon 0.2 \
-    --entropy_coeff 0.0 \
+    --entropy_coeff 1e-3 \
     --advantage_critic_reduction mean \
+    --log_ratio_clip 20.0 \
+    --log_prob_clip 50.0 \
+    --max_grad_norm 1.0 \
+    --use_huber_loss 1 \
+    --num_critic_updates 2 \
+    --num_actor_updates 4

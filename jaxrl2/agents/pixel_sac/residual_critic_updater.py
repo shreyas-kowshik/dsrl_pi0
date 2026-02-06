@@ -26,6 +26,22 @@ def _cosine_sim(a, b, eps=1e-8):
     return (jnp.sum(a * b, axis=-1) / (an * bn + eps))
 
 
+def _nan_to_num_tree(tree):
+    """Apply nan_to_num to all leaves in a pytree."""
+    return jax.tree_util.tree_map(
+        lambda x: jnp.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6), 
+        tree
+    )
+
+
+def _huber_loss(x, delta=1.0):
+    """Huber loss (smooth L1) for numerical stability with large TD errors."""
+    abs_x = jnp.abs(x)
+    return jnp.where(abs_x <= delta, 
+                     0.5 * x**2, 
+                     delta * (abs_x - 0.5 * delta))
+
+
 def update_critic_residual(
         key: PRNGKey, 
         actor: TrainState, 
@@ -37,7 +53,9 @@ def update_critic_residual(
         residual_alpha: float,
         query_frequency: int,
         backup_entropy: bool = False,
-        critic_reduction: str = 'min',) -> Tuple[TrainState, Dict[str, float]]:
+        critic_reduction: str = 'min',
+        use_huber_loss: bool = False,
+        huber_delta: float = 1.0,) -> Tuple[TrainState, Dict[str, float]]:
     """Update critic for Residual SAC.
     
     Args:
@@ -54,6 +72,8 @@ def update_critic_residual(
         residual_alpha: Scaling factor for residual actions.
         backup_entropy: Whether to include entropy in target Q.
         critic_reduction: How to reduce across ensemble ('min' or 'mean').
+        use_huber_loss: If True, use Huber loss instead of MSE for TD error.
+        huber_delta: Delta parameter for Huber loss (default 1.0).
         
     Returns:
         Updated critic TrainState and info dict.
@@ -146,7 +166,15 @@ def update_critic_residual(
 
         # chex.assert_rank(qs, 2)
         # chex.assert_equal(qs.shape[1], B)
-        critic_loss = ((qs - target_q)**2).mean()
+        
+        # Compute TD error
+        td_error = qs - target_q
+        
+        # Use Huber loss or MSE based on config
+        if use_huber_loss:
+            critic_loss = _huber_loss(td_error, delta=huber_delta).mean()
+        else:
+            critic_loss = (td_error**2).mean()
         
         # Compute logging metrics
         delta_norm = jnp.linalg.norm(delta_action.reshape(delta_action.shape[0], -1), axis=-1)
@@ -155,6 +183,10 @@ def update_critic_residual(
         
         # Clipping rate: fraction of action dimensions that hit the bounds
         clipping_rate = (jnp.abs(a_exec) >= 1.0).mean()
+        
+        # TD error stats for monitoring
+        td_error_abs_mean = jnp.abs(td_error).mean()
+        td_error_abs_max = jnp.abs(td_error).max()
         
         return critic_loss, {
             'critic_loss': critic_loss,
@@ -166,6 +198,8 @@ def update_critic_residual(
             'next_q_pi': next_qs.mean(),
             'target_q': target_q.mean(),
             'target_q_std': target_q.std(),
+            'td_error_abs_mean': td_error_abs_mean,
+            'td_error_abs_max': td_error_abs_max,
             # Residual-specific metrics
             'residual/delta_norm_mean': delta_norm.mean(),
             'residual/delta_norm_std': delta_norm.std(),
@@ -188,6 +222,10 @@ def update_critic_residual(
         }
 
     grads, info = jax.grad(critic_loss_fn, has_aux=True)(critic.params)
+    
+    # NaN guard: replace NaN/Inf in gradients with zeros
+    grads = _nan_to_num_tree(grads)
+    
     new_critic = critic.apply_gradients(grads=grads)
 
     return new_critic, info

@@ -11,8 +11,8 @@ class LearnedStdNormalPolicy(nn.Module):
     hidden_dims: Sequence[int]
     action_dim: int
     dropout_rate: Optional[float] = None
-    log_std_min: Optional[float] = -20
-    log_std_max: Optional[float] = 2
+    log_std_min: Optional[float] = -20.0
+    log_std_max: Optional[float] = 2.0
 
     @nn.compact
     def __call__(self,
@@ -72,8 +72,8 @@ class LearnedStdTanhNormalPolicy(nn.Module):
     hidden_dims: Sequence[int]
     action_dim: int
     dropout_rate: Optional[float] = None
-    log_std_min: Optional[float] = -20
-    log_std_max: Optional[float] = 2
+    log_std_min: Optional[float] = -20.0
+    log_std_max: Optional[float] = 2.0
     low: Optional[float] = None
     high: Optional[float] = None
 

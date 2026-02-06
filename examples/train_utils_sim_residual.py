@@ -147,19 +147,36 @@ def trajwise_alternating_training_loop_residual(
             else:
                 num_gradsteps = len(traj["rewards"]) * variant.multi_grad_step
 
-            if len(online_replay_buffer) > variant.start_online_updates:
-                for _ in range(num_gradsteps):
-                    # Perform first visualization before updating
-                    if i == 0:
-                        print('Performing evaluation for initial checkpoint (residual SAC)')
-                        if perform_control_evals:
-                            perform_control_eval_residual(agent, eval_env, i, variant, wandb_logger, agent_dp)
-                        if hasattr(agent, 'perform_eval'):
-                            agent.perform_eval(variant, i, wandb_logger, replay_buffer, replay_buffer_iterator, eval_env)
+            # UTD ratios: num_critic_updates and num_actor_updates per collected step
+            num_critic_updates = getattr(variant, 'num_critic_updates', 1)
+            num_actor_updates = getattr(variant, 'num_actor_updates', 1)
 
-                    # Online update
-                    batch = next(replay_buffer_iterator)
-                    update_info = agent.update(batch)
+            if len(online_replay_buffer) > variant.start_online_updates:
+                # Perform first visualization before updating
+                if i == 0:
+                    print('Performing evaluation for initial checkpoint (residual PPO)')
+                    if perform_control_evals:
+                        perform_control_eval_residual(agent, eval_env, i, variant, wandb_logger, agent_dp)
+                    if hasattr(agent, 'perform_eval'):
+                        agent.perform_eval(variant, i, wandb_logger, replay_buffer, replay_buffer_iterator, eval_env)
+
+                for _ in tqdm(range(num_gradsteps), desc='gradsteps', leave=False):
+                    # Critic updates: num_critic_updates per gradient step
+                    critic_info = {}
+                    for _ in range(num_critic_updates):
+                        batch = next(replay_buffer_iterator)
+                        critic_info = agent.update_critic(batch)
+
+                    # Actor updates: num_actor_updates per gradient step
+                    actor_info = {}
+                    for _ in range(num_actor_updates):
+                        batch = next(replay_buffer_iterator)
+                        actor_info = agent.update_actor(batch)
+
+                    # Combine info for logging
+                    update_info = {**critic_info, **actor_info}
+                    update_info['residual/alpha'] = float(agent._residual_alpha)
+                    update_info['algo'] = agent.algo
 
                     pbar.update()
                     i += 1
@@ -318,6 +335,11 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
                 # SAC samples residual
                 delta_actions_flat = agent.sample_actions(obs_dict)  # (1, query_frequency * action_dim)
                 delta_actions = np.reshape(delta_actions_flat, (query_frequency, variant.action_dim))
+                
+                # NaN guard: if action contains NaN/Inf, replace with zeros
+                if not np.all(np.isfinite(delta_actions)):
+                    print(f"[WARNING] NaN/Inf detected in delta_actions at t={t}, replacing with zeros")
+                    delta_actions = np.nan_to_num(delta_actions, nan=0.0, posinf=0.0, neginf=0.0)
             
             # 4. Compose executed action
             actions = np.clip(base_actions[:query_frequency] + residual_alpha * delta_actions, -1.0, 1.0)
@@ -458,6 +480,11 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
                     # SAC samples residual (deterministic: use mean)
                     delta_actions_flat = agent.eval_actions(obs_dict)  # Use eval_actions for deterministic
                     delta_actions = np.reshape(delta_actions_flat, (query_frequency, variant.action_dim))
+                    
+                    # NaN guard: if action contains NaN/Inf, replace with zeros
+                    if not np.all(np.isfinite(delta_actions)):
+                        print(f"[WARNING] NaN/Inf detected in eval delta_actions at t={t}, replacing with zeros")
+                        delta_actions = np.nan_to_num(delta_actions, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 # 3. Compose executed action
                 actions = np.clip(base_actions[:query_frequency] + residual_alpha * delta_actions, -1.0, 1.0)
