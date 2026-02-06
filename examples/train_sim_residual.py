@@ -227,6 +227,11 @@ def main_residual(variant):
     # Create Residual RL agent based on algorithm
     if algo == 'residual_sac':
         # SAC learner
+        kwargs['use_huber_loss'] = variant.get('use_huber_loss', False)
+        kwargs['huber_delta'] = variant.get('huber_delta', 1.0)
+        kwargs['max_grad_norm'] = variant.get('max_grad_norm', 1.0)
+        kwargs['num_critic_updates'] = variant.get('num_critic_updates', 1)
+        kwargs['num_actor_updates'] = variant.get('num_actor_updates', 1)
         agent = PixelSACResidualLearner(variant.seed, sample_obs, sample_action, **kwargs)
         print(f"Initialized Residual SAC with alpha={variant.residual_alpha}")
     elif algo in ['q_weighted_pg', 'residual_grpo']:

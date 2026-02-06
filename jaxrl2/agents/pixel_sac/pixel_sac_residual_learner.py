@@ -134,6 +134,147 @@ def _update_residual_jit(
     }
 
 
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
+        'backup_entropy', 'query_frequency', 'use_huber_loss',
+    ),
+)
+def _update_critic_jit(
+    rng: PRNGKey,
+    actor: TrainState,
+    critic: TrainState,
+    target_critic_params: Params,
+    temp: TrainState,
+    batch: DatasetDict,
+    discount: float,
+    tau: float,
+    residual_alpha: float,
+    critic_reduction: str,
+    color_jitter: bool,
+    aug_next: bool,
+    num_cameras: int,
+    backup_entropy: bool,
+    query_frequency: int,
+    use_huber_loss: bool = False,
+    huber_delta: float = 1.0,
+) -> Tuple[PRNGKey, TrainState, Params, Dict[str, float]]:
+    """JIT-compiled critic update for Residual SAC."""
+    aug_pixels = batch['observations']['pixels']
+    aug_next_pixels = batch['next_observations']['pixels']
+
+    if batch['observations']['pixels'].squeeze().ndim != 2:
+        rng, key = jax.random.split(rng)
+        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
+
+        if color_jitter:
+            rng, key = jax.random.split(rng)
+            if num_cameras > 1:
+                for i in range(num_cameras):
+                    aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
+                        (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                    )
+            else:
+                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+
+    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
+    batch = batch.copy(add_or_replace={'observations': observations})
+
+    key, rng = jax.random.split(rng)
+    if aug_next:
+        rng, key = jax.random.split(rng)
+        aug_next_pixels = batched_random_crop(key, batch['next_observations']['pixels'])
+        if color_jitter:
+            rng, key = jax.random.split(rng)
+            if num_cameras > 1:
+                for i in range(num_cameras):
+                    aug_next_pixels = aug_next_pixels.at[:, :, :, i*3:(i+1)*3].set(
+                        (color_transform(key, aug_next_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                    )
+            else:
+                aug_next_pixels = (color_transform(key, aug_next_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+        next_observations = batch['next_observations'].copy(add_or_replace={'pixels': aug_next_pixels})
+        batch = batch.copy(add_or_replace={'next_observations': next_observations})
+
+    key, rng = jax.random.split(rng)
+    target_critic = critic.replace(params=target_critic_params)
+    new_critic, critic_info = update_critic_residual(
+        key,
+        actor,
+        critic,
+        target_critic,
+        temp,
+        batch,
+        discount,
+        residual_alpha,
+        query_frequency,
+        critic_reduction=critic_reduction,
+        backup_entropy=backup_entropy,
+        use_huber_loss=use_huber_loss,
+        huber_delta=huber_delta,
+    )
+    new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
+
+    return rng, new_critic, new_target_critic_params, critic_info
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        'critic_reduction', 'color_jitter', 'num_cameras', 'query_frequency',
+    ),
+)
+def _update_actor_jit(
+    rng: PRNGKey,
+    actor: TrainState,
+    critic: TrainState,
+    temp: TrainState,
+    batch: DatasetDict,
+    residual_alpha: float,
+    critic_reduction: str,
+    color_jitter: bool,
+    num_cameras: int,
+    query_frequency: int,
+    target_entropy: float,
+) -> Tuple[PRNGKey, TrainState, TrainState, Dict[str, float]]:
+    """JIT-compiled actor + temperature update for Residual SAC."""
+    aug_pixels = batch['observations']['pixels']
+
+    if batch['observations']['pixels'].squeeze().ndim != 2:
+        rng, key = jax.random.split(rng)
+        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
+
+        if color_jitter:
+            rng, key = jax.random.split(rng)
+            if num_cameras > 1:
+                for i in range(num_cameras):
+                    aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
+                        (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                    )
+            else:
+                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+
+    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
+    batch = batch.copy(add_or_replace={'observations': observations})
+
+    key, rng = jax.random.split(rng)
+    new_actor, actor_info = update_actor_residual(
+        key,
+        actor,
+        critic,
+        temp,
+        batch,
+        residual_alpha,
+        query_frequency,
+        critic_reduction=critic_reduction,
+    )
+
+    new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
+
+    return rng, new_actor, new_temp, {**actor_info, **alpha_info}
+
+
 class PixelSACResidualLearner(Agent):
     """Residual SAC Learner for pixel observations with base action conditioning.
     
@@ -176,6 +317,11 @@ class PixelSACResidualLearner(Agent):
                  clip_temp: bool = True,
                  clip_min_temp: float = 0.01,
                  clip_max_temp: float = 2.0,
+                 use_huber_loss: bool = False,
+                 huber_delta: float = 1.0,
+                 max_grad_norm: float = 1.0,
+                 num_critic_updates: int = 1,
+                 num_actor_updates: int = 1,
                  ):
         """Initialize Residual SAC Learner.
         
@@ -226,6 +372,12 @@ class PixelSACResidualLearner(Agent):
         self.discount = discount
         self.critic_reduction = critic_reduction
         self.critic_backup_entropy = backup_entropy
+        self.algo = 'residual_sac'
+        self.use_huber_loss = use_huber_loss
+        self.huber_delta = huber_delta
+        self.max_grad_norm = max_grad_norm
+        self.num_critic_updates = num_critic_updates
+        self.num_actor_updates = num_actor_updates
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
@@ -279,11 +431,15 @@ class PixelSACResidualLearner(Agent):
         actor_def_init = actor_def.init(actor_key, observations)
         actor_params = actor_def_init['params']
         actor_batch_stats = actor_def_init['batch_stats'] if 'batch_stats' in actor_def_init else None
+        actor_optimizer = optax.chain(
+            optax.clip_by_global_norm(self.max_grad_norm),
+            optax.adam(learning_rate=actor_lr),
+        )
 
         actor = TrainState.create(
             apply_fn=actor_def.apply,
             params=actor_params,
-            tx=optax.adam(learning_rate=actor_lr),
+            tx=actor_optimizer,
             batch_stats=actor_batch_stats,
             
         )
@@ -308,10 +464,14 @@ class PixelSACResidualLearner(Agent):
 
         critic_params = critic_def_init['params']
         critic_batch_stats = critic_def_init['batch_stats'] if 'batch_stats' in critic_def_init else None
+        critic_optimizer = optax.chain(
+            optax.clip_by_global_norm(self.max_grad_norm),
+            optax.adam(learning_rate=critic_lr),
+        )
         critic = TrainState.create(
             apply_fn=critic_def.apply,
             params=critic_params,
-            tx=optax.adam(learning_rate=critic_lr),
+            tx=critic_optimizer,
             batch_stats=critic_batch_stats
         )
         target_critic_params = copy.deepcopy(critic_params)
@@ -343,9 +503,77 @@ class PixelSACResidualLearner(Agent):
         print(f'  action_chunk_shape: {self.action_chunk_shape}')
         print(f'  target_entropy: {self.target_entropy}')
         print(f'  critic_reduction: {self.critic_reduction}')
+        print(f'  use_huber_loss: {self.use_huber_loss}')
+        print(f'  huber_delta: {self.huber_delta}')
+        print(f'  max_grad_norm: {self.max_grad_norm}')
+        print(f'  num_critic_updates: {self.num_critic_updates}')
+        print(f'  num_actor_updates: {self.num_actor_updates}')
+
+    def update_critic(self, batch: FrozenDict) -> Dict[str, float]:
+        """Perform a single critic update.
+        
+        Args:
+            batch: Batch of transitions with observations containing 'base_action'.
+            
+        Returns:
+            Dictionary of critic training metrics.
+        """
+        new_rng, new_critic, new_target_critic, critic_info = _update_critic_jit(
+            self._rng,
+            self._actor,
+            self._critic,
+            self._target_critic_params,
+            self._temp,
+            batch,
+            self.discount,
+            self.tau,
+            self._residual_alpha,
+            self.critic_reduction,
+            self.color_jitter,
+            self.aug_next,
+            self.num_cameras,
+            self.critic_backup_entropy,
+            self.query_frequency,
+            self.use_huber_loss,
+            self.huber_delta,
+        )
+        self._rng = new_rng
+        self._critic = new_critic
+        self._target_critic_params = new_target_critic
+        return critic_info
+
+    def update_actor(self, batch: FrozenDict) -> Dict[str, float]:
+        """Perform a single actor + temperature update.
+        
+        Args:
+            batch: Batch of transitions with observations containing 'base_action'.
+            
+        Returns:
+            Dictionary of actor training metrics.
+        """
+        new_rng, new_actor, new_temp, actor_info = _update_actor_jit(
+            self._rng,
+            self._actor,
+            self._critic,
+            self._temp,
+            batch,
+            self._residual_alpha,
+            self.critic_reduction,
+            self.color_jitter,
+            self.num_cameras,
+            self.query_frequency,
+            self.target_entropy,
+        )
+        self._rng = new_rng
+        self._actor = new_actor
+        self._temp = new_temp
+        return actor_info
 
     def update(self, batch: FrozenDict) -> Dict[str, float]:
-        """Update actor, critic, and temperature.
+        """Perform one critic update and one actor update (for backward compatibility).
+        
+        For proper UTD control, use update_critic() and update_actor() separately
+        in the training loop with freshly sampled batches.
         
         Args:
             batch: Batch of transitions with observations containing 'base_action'.
@@ -353,23 +581,14 @@ class PixelSACResidualLearner(Agent):
         Returns:
             Dictionary of training metrics.
         """
-        new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_residual_jit(
-            self._rng, self._actor, self._critic, self._target_critic_params, 
-            self._temp, batch, self.discount, self.tau, self.target_entropy,
-            self._residual_alpha, self.critic_reduction, self.color_jitter, 
-            self.aug_next, self.num_cameras, self.critic_backup_entropy, self.query_frequency
-        )
+        critic_info = self.update_critic(batch)
+        actor_info = self.update_actor(batch)
 
-        self._rng = new_rng
-        self._actor = new_actor
-        self._critic = new_critic
-        self._target_critic_params = new_target_critic
-        self._temp = new_temp
-        
-        # Add residual_alpha to info for logging
-        info['residual/alpha'] = float(self._residual_alpha)
-        
-        return info
+        all_info = {**critic_info, **actor_info}
+        all_info['residual/alpha'] = float(self._residual_alpha)
+        all_info['algo'] = self.algo
+
+        return all_info
 
     def perform_eval(self, variant, i, wandb_logger, eval_buffer, eval_buffer_iterator, eval_env):
         """Perform evaluation visualization."""
@@ -424,6 +643,7 @@ class PixelSACResidualLearner(Agent):
             'actor': self._actor,
             'temp': self._temp,
             'residual_alpha': self._residual_alpha,
+            'algo': self.algo,
         }
         return save_dict
 
@@ -436,7 +656,9 @@ class PixelSACResidualLearner(Agent):
         self._temp = output_dict['temp']
         if 'residual_alpha' in output_dict:
             self._residual_alpha = jnp.asarray(output_dict['residual_alpha'], dtype=jnp.float32)
-        print(f'Restored residual SAC checkpoint from {dir}')
+        if 'algo' in output_dict:
+            self.algo = output_dict['algo']
+        print(f'Restored residual SAC checkpoint from {dir} (algo: {self.algo})')
 
 
 @functools.partial(jax.jit)
