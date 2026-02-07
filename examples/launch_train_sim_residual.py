@@ -41,6 +41,7 @@ if __name__ == '__main__':
     parser.add_argument('--residual_alpha', default=0.1, help='Scaling factor for residual actions', type=float)
     parser.add_argument('--chunk_len', default=10, help='Action chunk length (Pi-0.5 horizon)', type=int)
     parser.add_argument('--use_zero_residual_initially', default=1, help='Use zero residual for first trajectory (1=yes, 0=no)', type=int)
+    parser.add_argument('--predict_a_exec', default=0, help='Actor predicts a_exec directly instead of delta (1=yes, 0=no)', type=int)
     
     # Algorithm selection: 'residual_sac', 'q_weighted_pg', 'residual_grpo'
     parser.add_argument('--algo', default='residual_sac', help='Algorithm: residual_sac, q_weighted_pg, residual_grpo', type=str)
@@ -74,6 +75,14 @@ if __name__ == '__main__':
     # Success buffer parameters
     parser.add_argument('--success_buffer_ratio', default=0.0, help='Fraction of actor batch from success buffer (0 = disabled, e.g. 0.2 for 20%%)', type=float)
     parser.add_argument('--success_buffer_min_size', default=100, help='Min samples in success buffer before using it', type=int)
+
+    # On-policy PPO parameters
+    parser.add_argument('--on_policy_ppo', default=0, help='Use on-policy PPO with stored log_probs (1=yes, 0=no)', type=int)
+    parser.add_argument('--normalize_advantages', default=0, help='Normalize advantages (1=yes, 0=no)', type=int)
+    
+    # Policy std bounds (NaN stability)
+    parser.add_argument('--log_std_min', default=-5.0, help='Min log_std for policy (NaN stability)', type=float)
+    parser.add_argument('--log_std_max', default=2.0, help='Max log_std for policy', type=float)
 
     # Default training kwargs
     train_args_dict = dict(
@@ -110,11 +119,14 @@ if __name__ == '__main__':
     
     # Convert flag to boolean
     variant['use_zero_residual_initially'] = bool(variant.get('use_zero_residual_initially', 1))
+    variant['predict_a_exec'] = bool(variant.get('predict_a_exec', 0))
     variant['backup_entropy'] = bool(variant.get('backup_entropy', 0))
     variant['critic_pop_base_actions'] = bool(variant.get('critic_pop_base_actions', 0))
     variant['clip_temp'] = bool(variant.get('clip_temp', 1))
     variant['use_huber_loss'] = bool(variant.get('use_huber_loss', 0))
     variant['bc_on_success_only'] = bool(variant.get('bc_on_success_only', 0))
+    variant['on_policy_ppo'] = bool(variant.get('on_policy_ppo', 0))
+    variant['normalize_advantages'] = bool(variant.get('normalize_advantages', 0))
     
     algo = variant.get('algo', 'residual_sac')
     print("=" * 60)
@@ -124,6 +136,7 @@ if __name__ == '__main__':
     print(f"  residual_alpha: {variant.get('residual_alpha', 0.1)}")
     print(f"  chunk_len: {variant.get('chunk_len', 10)}")
     print(f"  use_zero_residual_initially: {variant.get('use_zero_residual_initially', True)}")
+    print(f"  predict_a_exec: {variant.get('predict_a_exec', False)}")
     if algo in ['q_weighted_pg', 'residual_grpo']:
         print(f"  grpo_num_samples: {variant.get('grpo_num_samples', 8)}")
         print(f"  clip_epsilon: {variant.get('clip_epsilon', 0.2)}")
@@ -147,6 +160,11 @@ if __name__ == '__main__':
     print(f"  bc_on_success_only: {variant.get('bc_on_success_only', False)}")
     print(f"  success_buffer_ratio: {variant.get('success_buffer_ratio', 0.0)}")
     print(f"  success_buffer_min_size: {variant.get('success_buffer_min_size', 100)}")
+    print("  --- On-policy PPO ---")
+    print(f"  on_policy_ppo: {variant.get('on_policy_ppo', False)}")
+    print(f"  normalize_advantages: {variant.get('normalize_advantages', False)}")
+    print(f"  log_std_min: {variant.get('log_std_min', -5.0)}")
+    print(f"  log_std_max: {variant.get('log_std_max', 2.0)}")
     print("=" * 60)
     print(variant)
     

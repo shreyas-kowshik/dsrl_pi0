@@ -43,6 +43,8 @@ class ReplayBuffer(Dataset):
         discount = np.empty((self.capacity, ), dtype=np.float32)
         success_flag = np.zeros((self.capacity, ), dtype=np.float32)
 
+        old_log_probs = np.zeros((self.capacity, ), dtype=np.float32)
+
         self.data = {
             'observations': observations,
             'next_observations': next_observations,
@@ -52,6 +54,7 @@ class ReplayBuffer(Dataset):
             'masks': masks,
             'discount': discount,
             'success_flag': success_flag,
+            'old_log_probs': old_log_probs,
         }
 
         self.size = 0
@@ -59,6 +62,7 @@ class ReplayBuffer(Dataset):
         self._start = 0
         self.traj_bounds = dict()
         self.streaming_buffer_size = None # this is for streaming the online data
+        self._last_traj_indices = None  # indices of the most recently inserted trajectory
 
     def __len__(self) -> int:
         return self.size
@@ -68,6 +72,7 @@ class ReplayBuffer(Dataset):
 
     def increment_traj_counter(self):
         self.traj_bounds[self._traj_counter] = (self._start, self.size) # [start, end)
+        self._last_traj_indices = np.arange(self._start, self.size)
         self._start = self.size
         self._traj_counter += 1
 
@@ -125,6 +130,7 @@ class ReplayBuffer(Dataset):
             masks = np.empty((self.capacity, ), dtype=np.float32)
             discount = np.empty((self.capacity, ), dtype=np.float32)
             success_flag = np.zeros((self.capacity, ), dtype=np.float32)
+            old_log_probs = np.zeros((self.capacity, ), dtype=np.float32)
 
             data_new = {
                 'observations': observations,
@@ -135,6 +141,7 @@ class ReplayBuffer(Dataset):
                 'masks': masks,
                 'discount': discount,
                 'success_flag': success_flag,
+                'old_log_probs': old_log_probs,
             }
 
             for x in data_new:
@@ -170,7 +177,9 @@ class ReplayBuffer(Dataset):
         self.data['next_actions'] = (self.data['next_actions'] - action_stats['mean']) / action_stats['std']
 
     def sample(self, batch_size: int, keys: Optional[Iterable[str]] = None, indx: Optional[np.ndarray] = None) -> frozen_dict.FrozenDict:
-        if self.streaming_buffer_size:
+        if indx is not None:
+            indices = indx
+        elif self.streaming_buffer_size:
             indices = np.random.randint(0, self.streaming_buffer_size, batch_size)
         else:
             indices = np.random.randint(0, self.size, batch_size)
@@ -186,6 +195,24 @@ class ReplayBuffer(Dataset):
                 raise TypeError()
         
         return frozen_dict.freeze(data_dict)
+
+    def sample_from_last_traj(self, batch_size: int) -> frozen_dict.FrozenDict:
+        """Sample a batch from the most recently inserted trajectory.
+        
+        Samples with replacement from the last trajectory's indices.
+        If the trajectory has fewer transitions than batch_size, transitions
+        will be repeated.
+        
+        Returns:
+            FrozenDict batch sampled from the last trajectory.
+        """
+        assert self._last_traj_indices is not None, "No trajectory has been inserted yet"
+        indices = np.random.choice(self._last_traj_indices, size=batch_size, replace=True)
+        return self.sample(batch_size, indx=indices)
+
+    def get_last_traj_indices(self) -> Optional[np.ndarray]:
+        """Return the indices of the most recently inserted trajectory."""
+        return self._last_traj_indices
 
     def get_iterator(self, batch_size: int, keys: Optional[Iterable[str]] = None, indx: Optional[np.ndarray] = None, queue_size: int = 2):
         # See https://flax.readthedocs.io/en/latest/_modules/flax/jax_utils.html#prefetch_to_device

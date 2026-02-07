@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=residual_grpo_pi0      # Job name
+#SBATCH --job-name=residual_onpolicy_ppo  # Job name
 #SBATCH --nodes=1                          # Number of nodes
 #SBATCH --gres=gpu:1                       # GPUs per node
 #SBATCH --cpus-per-task=12                 # CPU cores per task
 #SBATCH --mem=128G                         # Memory per node
 #SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
 #SBATCH --partition=general                # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/grpo_logs/logs/residual_grpo_libero_pi0_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/sreyasv/grpo_logs/logs/residual_grpo_libero_pi0_%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/sreyasv/onpolicy_ppo_logs/logs/residual_onpolicy_ppo_%x_%j.out
+#SBATCH --error=/data/user_data/sreyasv/onpolicy_ppo_logs/logs/residual_onpolicy_ppo_%x_%j.err
 
 # -------------------------------
 # Environment setup
@@ -15,12 +15,12 @@
 source /home/sreyasv/miniconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0
 
-mkdir -p /data/user_data/sreyasv/grpo_logs/logs/
+mkdir -p /data/user_data/sreyasv/onpolicy_ppo_logs/logs/
 
 # -------------------------------
 # Configuration
 # -------------------------------
-proj_name=libero-residual-grpo
+proj_name=libero-residual-onpolicy-ppo
 device_id=0
 
 export DISPLAY=:0
@@ -29,7 +29,7 @@ export PYOPENGL_PLATFORM=egl
 export MUJOCO_EGL_DEVICE_ID=$device_id
 
 export OPENPI_DATA_HOME=/data/hf_cache/pi-models/openpi
-export EXP=/data/user_data/sreyasv/grpo_exp/logs/$proj_name
+export EXP=/data/user_data/sreyasv/onpolicy_ppo_exp/logs/$proj_name
 export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
@@ -37,36 +37,36 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 pip install mujoco==3.3.1
 
 # -------------------------------
-# Launch Residual GRPO Training
+# Launch On-policy PPO Training
 # -------------------------------
-# Algorithm options: residual_sac, q_weighted_pg, residual_grpo
-# - q_weighted_pg: Uses raw Q as advantage (no baseline)
-# - residual_grpo: Uses Q - mean(Q) as advantage (GRPO baseline)
-# start_online_updates=500 and batch_size=256 eval_episodes=10
+# on_policy_ppo=1: Uses stored old_log_probs for proper importance ratios
+# Bandit-style: raw Q values as advantages (no GRPO baseline)
+# Actor samples from last trajectory only
+# Critic still learns from full replay buffer
 
 python -m examples.launch_train_sim_residual \
-    --algorithm residual_grpo \
-    --algo residual_grpo \
+    --algorithm on_policy_ppo \
+    --algo q_weighted_pg \
     --env libero \
-    --prefix residual_grpo_pi05-new_ckpt_mokaPots-4k-ra-1 \
+    --prefix residual_onpolicy_ppo-pi05-mokaPots-4k \
     --wandb_project ${proj_name} \
-    --batch_size 256 \
+    --batch_size 32 \
     --discount 0.999 \
     --seed 0 \
-    --max_steps 2500000 \
+    --max_steps 1000000 \
     --eval_interval 10000 \
     --log_interval 500 \
     --checkpoint_interval 500000 \
     --eval_episodes 10 \
     --multi_grad_step 20 \
-    --start_online_updates 500 \
+    --start_online_updates 50 \
     --resize_image 100 \
     --action_magnitude 1.0 \
     --query_freq 10 \
     --hidden_dims 128 \
     --pi_05_config pi05_libero_finetuned_two_moka_pots \
     --pi_05_ckpt_dir /data/hf_cache/models/pi05_libero_ep5_mokapots_4k/ \
-    --residual_alpha 1 \
+    --residual_alpha 0.1 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
     --grpo_num_samples 8 \
@@ -83,7 +83,7 @@ python -m examples.launch_train_sim_residual \
     --bc_on_success_only 0 \
     --success_buffer_ratio 0.0 \
     --success_buffer_min_size 100 \
-    --on_policy_ppo 0 \
+    --on_policy_ppo 1 \
     --normalize_advantages 0 \
     --log_std_min -5.0 \
     --log_std_max 2.0

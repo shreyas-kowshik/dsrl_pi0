@@ -234,8 +234,9 @@ def main_residual(variant):
         kwargs['num_actor_updates'] = variant.get('num_actor_updates', 1)
         kwargs['bc_reg_coeff'] = variant.get('bc_reg_coeff', 0.0)
         kwargs['bc_on_success_only'] = variant.get('bc_on_success_only', False)
+        kwargs['predict_a_exec'] = variant.get('predict_a_exec', False)
         agent = PixelSACResidualLearner(variant.seed, sample_obs, sample_action, **kwargs)
-        print(f"Initialized Residual SAC with alpha={variant.residual_alpha}")
+        print(f"Initialized Residual SAC with alpha={variant.residual_alpha}, predict_a_exec={variant.get('predict_a_exec', False)}")
     elif algo in ['q_weighted_pg', 'residual_grpo']:
         # PPO/GRPO learner
         ppo_kwargs = {k: v for k, v in kwargs.items() if k not in ['temp_lr', 'init_temperature', 'backup_entropy', 'clip_temp', 'clip_min_temp', 'clip_max_temp', 'target_entropy']}
@@ -259,8 +260,13 @@ def main_residual(variant):
         ppo_kwargs['num_actor_updates'] = variant.get('num_actor_updates', 4)
         ppo_kwargs['bc_reg_coeff'] = variant.get('bc_reg_coeff', 0.0)
         ppo_kwargs['bc_on_success_only'] = variant.get('bc_on_success_only', False)
+        ppo_kwargs['on_policy_ppo'] = variant.get('on_policy_ppo', False)
+        ppo_kwargs['normalize_advantages'] = variant.get('normalize_advantages', False)
+        ppo_kwargs['log_std_min'] = variant.get('log_std_min', -5.0)
+        ppo_kwargs['log_std_max'] = variant.get('log_std_max', 2.0)
+        ppo_kwargs['predict_a_exec'] = variant.get('predict_a_exec', False)
         agent = PixelPPOResidualLearner(variant.seed, sample_obs, sample_action, **ppo_kwargs)
-        print(f"Initialized Residual {algo.upper()} with alpha={variant.residual_alpha}")
+        print(f"Initialized Residual {algo.upper()} with alpha={variant.residual_alpha}, predict_a_exec={variant.get('predict_a_exec', False)}")
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
 

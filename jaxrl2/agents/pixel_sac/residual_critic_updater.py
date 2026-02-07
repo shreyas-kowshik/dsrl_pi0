@@ -55,7 +55,8 @@ def update_critic_residual(
         backup_entropy: bool = False,
         critic_reduction: str = 'min',
         use_huber_loss: bool = False,
-        huber_delta: float = 1.0,) -> Tuple[TrainState, Dict[str, float]]:
+        huber_delta: float = 1.0,
+        predict_a_exec: bool = False,) -> Tuple[TrainState, Dict[str, float]]:
     """Update critic for Residual SAC.
     
     Args:
@@ -66,7 +67,7 @@ def update_critic_residual(
         temp: Temperature TrainState.
         batch: Batch of transitions containing:
             - observations['base_action']: (B, chunk_len, action_dim, 1) base actions
-            - actions: (B, chunk_len, action_dim) residual/delta actions
+            - actions: (B, chunk_len, action_dim) residual/delta actions (or a_exec if predict_a_exec)
             - next_observations['base_action']: (B, chunk_len, action_dim, 1) next base actions
         discount: Discount factor.
         residual_alpha: Scaling factor for residual actions.
@@ -74,6 +75,7 @@ def update_critic_residual(
         critic_reduction: How to reduce across ensemble ('min' or 'mean').
         use_huber_loss: If True, use Huber loss instead of MSE for TD error.
         huber_delta: Delta parameter for Huber loss (default 1.0).
+        predict_a_exec: If True, actor predicts a_exec directly; stored actions ARE a_exec.
         
     Returns:
         Updated critic TrainState and info dict.
@@ -96,33 +98,37 @@ def update_critic_residual(
     # chex.assert_shape(next_base_action, (B, T, A))
 
     
-    # Stored actions are delta/residual actions
-    delta_action = batch['actions']  # (B, query_frequency, action_dim)
-    # chex.assert_shape(delta_action, (B, T, A))
-    # chex.assert_tree_all_finite(delta_action)
+    # Stored actions: either delta actions or a_exec depending on predict_a_exec
+    stored_action = batch['actions']  # (B, query_frequency, action_dim)
     
-    # Compose executed action for current transition
-    a_exec = jnp.clip(base_action[:, :query_frequency, : ] + residual_alpha * delta_action, -1.0, 1.0)
+    if predict_a_exec:
+        # Actor predicts a_exec directly; stored actions ARE a_exec
+        a_exec = stored_action  # already a_exec, just clip for safety
+        a_exec = jnp.clip(a_exec, -1.0, 1.0)
+        # Back-derive delta for logging
+        delta_action = (a_exec - base_action[:, :query_frequency, :]) / jnp.maximum(jnp.abs(residual_alpha), 1e-8)
+    else:
+        # Original formulation: stored actions are delta, compose a_exec
+        delta_action = stored_action
+        a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * delta_action, -1.0, 1.0)
     
     # Flatten action chunks for critic input: (B, query_frequency, action_dim) -> (B, query_frequency * action_dim)
     a_exec_flat = a_exec.reshape(a_exec.shape[0], -1)
     
-    # Sample next delta actions from actor
+    # Sample next actions from actor
     key, sample_key = jax.random.split(key)
     dist = actor.apply_fn({'params': actor.params}, batch['next_observations'])
-    next_delta_actions, next_log_probs = dist.sample_and_log_prob(seed=sample_key)
+    next_actions_sampled, next_log_probs = dist.sample_and_log_prob(seed=sample_key)
     
-    # # Reshape next delta actions: (B, chunk_len * action_dim) -> (B, chunk_len, action_dim)
-    # chex.assert_rank(next_delta_actions, 2)
-    # chex.assert_shape(next_delta_actions, (B, T * A))
-
-    # # Log probs should be per-sample scalar (B,)
-    # chex.assert_rank(next_log_probs, 1)
-    # chex.assert_shape(next_log_probs, (B,))
-    next_delta_actions_chunked = next_delta_actions.reshape(B, query_frequency, A)
+    next_actions_chunked = next_actions_sampled.reshape(B, query_frequency, A)
     
-    # Compose next executed action
-    next_a_exec = jnp.clip(next_base_action[:, :query_frequency, :] + residual_alpha * next_delta_actions_chunked, -1.0, 1.0)
+    if predict_a_exec:
+        # Actor output IS a_exec directly
+        next_a_exec = jnp.clip(next_actions_chunked, -1.0, 1.0)
+    else:
+        # Original: actor outputs delta, compose next a_exec
+        next_a_exec = jnp.clip(next_base_action[:, :query_frequency, :] + residual_alpha * next_actions_chunked, -1.0, 1.0)
+    
     next_a_exec_flat = next_a_exec.reshape(next_a_exec.shape[0], -1)
     
     # Compute target Q values

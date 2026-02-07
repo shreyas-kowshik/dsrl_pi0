@@ -43,6 +43,7 @@ def update_actor_residual(
         bc_flag: bool = False,
         bc_reg_coeff: float = 0.0,
         bc_on_success_only: bool = False,
+        predict_a_exec: bool = False,
 ) -> Tuple[TrainState, Dict[str, float]]:
     """Update actor for Residual SAC.
     
@@ -56,6 +57,7 @@ def update_actor_residual(
         residual_alpha: Scaling factor for residual actions.
         cross_norm: Whether to use cross normalization (for batch norm).
         critic_reduction: How to reduce across ensemble ('min' or 'mean').
+        predict_a_exec: If True, actor predicts a_exec directly (not delta).
         
     Returns:
         Updated actor TrainState and info dict.
@@ -104,20 +106,28 @@ def update_actor_residual(
         mean_dist_norm = jnp.linalg.norm(mean_dist, axis=-1)
         std_dist_norm = jnp.linalg.norm(std_diag_dist, axis=-1)
         
-        # Sample delta actions from the policy
-        delta_actions, log_probs = dist.sample_and_log_prob(seed=key_act)  # (B, chunk_len * action_dim)
-        # chex.assert_rank(delta_actions, 2)
-        # chex.assert_shape(delta_actions, (B, query_frequency * A))
+        # Sample actions from the policy
+        actions_sampled, log_probs = dist.sample_and_log_prob(seed=key_act)  # (B, chunk_len * action_dim)
+        # chex.assert_rank(actions_sampled, 2)
+        # chex.assert_shape(actions_sampled, (B, query_frequency * A))
 
         # chex.assert_rank(log_probs, 1)
         # chex.assert_shape(log_probs, (B,))
         
-        # Reshape delta actions to chunk shape: (B, chunk_len * action_dim) -> (B, chunk_len, action_dim)
-        delta_actions_chunked = delta_actions.reshape(B, query_frequency, A)
+        # Reshape to chunk shape: (B, chunk_len * action_dim) -> (B, chunk_len, action_dim)
+        actions_chunked = actions_sampled.reshape(B, query_frequency, A)
         
-        # Compose executed action
-        a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * delta_actions_chunked, -1.0, 1.0)
+        if predict_a_exec:
+            # Actor predicts a_exec directly
+            a_exec = jnp.clip(actions_chunked, -1.0, 1.0)
+            delta_actions_chunked = (a_exec - base_action[:, :query_frequency, :]) / jnp.maximum(jnp.abs(residual_alpha), 1e-8)
+        else:
+            # Original: actor predicts delta, compose a_exec
+            delta_actions_chunked = actions_chunked
+            a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * actions_chunked, -1.0, 1.0)
+        
         a_exec_flat = a_exec.reshape(a_exec.shape[0], -1)  # (B, chunk_len * action_dim)
+        delta_actions = delta_actions_chunked.reshape(B, query_frequency * A)  # for logging
         
         # Evaluate Q on composed action
         if hasattr(critic, 'batch_stats') and critic.batch_stats is not None:
@@ -325,6 +335,7 @@ def update_actor_residual_ppo(
         entropy_coeff: float = 1e-3,
         advantage_critic_reduction: str = 'mean',
         use_grpo_baseline: bool = True,
+        normalize_advantages: bool = False,
         adv_clip_min: Optional[float] = None,
         adv_clip_max: Optional[float] = None,
         log_ratio_clip: float = 20.0,
@@ -332,6 +343,7 @@ def update_actor_residual_ppo(
         bc_flag: bool = False,
         bc_reg_coeff: float = 0.0,
         bc_on_success_only: bool = False,
+        predict_a_exec: bool = False,
 ) -> Tuple[TrainState, Dict[str, float]]:
     """Update actor for Residual Q-weighted PG / GRPO.
     
@@ -408,9 +420,12 @@ def update_actor_residual_ppo(
     chex.assert_shape(old_log_probs, (G, B))
     
     # Step 2: Compute Q values for all samples
-    def compute_q_for_sample(delta_flat):
-        delta_chunked = delta_flat.reshape(B, query_frequency, action_dim)
-        a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * delta_chunked, -1.0, 1.0)
+    def compute_q_for_sample(action_flat):
+        action_chunked = action_flat.reshape(B, query_frequency, action_dim)
+        if predict_a_exec:
+            a_exec = jnp.clip(action_chunked, -1.0, 1.0)
+        else:
+            a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * action_chunked, -1.0, 1.0)
         a_exec_flat = a_exec.reshape(B, query_frequency * action_dim)
         qs = target_critic.apply_fn({'params': target_critic.params}, batch['observations'], a_exec_flat)
         if advantage_critic_reduction == 'min':
@@ -432,6 +447,12 @@ def update_actor_residual_ppo(
         advantages = q_values  # (G, B)
     
     chex.assert_shape(advantages, (G, B))
+    
+    # Optional advantage normalization
+    if normalize_advantages:
+        adv_std = jnp.std(advantages) + 1e-8
+        adv_mean = jnp.mean(advantages)
+        advantages = (advantages - adv_mean) / adv_std
     
     # Optional advantage clipping
     if adv_clip_min is not None or adv_clip_max is not None:
@@ -505,9 +526,13 @@ def update_actor_residual_ppo(
         # Sample diagnostics from first sample
         delta_sample = delta_actions[0]
         delta_chunked = delta_sample.reshape(B, query_frequency, action_dim)
-        a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * delta_chunked, -1.0, 1.0)
-        
-        delta_norm = jnp.linalg.norm(delta_sample, axis=-1)
+        if predict_a_exec:
+            a_exec = jnp.clip(delta_chunked, -1.0, 1.0)
+            delta_for_logging = (a_exec - base_action[:, :query_frequency, :]) / jnp.maximum(jnp.abs(residual_alpha), 1e-8)
+            delta_norm = jnp.linalg.norm(delta_for_logging.reshape(B, -1), axis=-1)
+        else:
+            a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * delta_chunked, -1.0, 1.0)
+            delta_norm = jnp.linalg.norm(delta_sample, axis=-1)
         base_flat = base_action[:, :query_frequency, :].reshape(B, query_frequency * action_dim)
         base_norm = jnp.linalg.norm(base_flat, axis=-1)
         eff_delta_norm = jnp.abs(residual_alpha) * delta_norm
@@ -555,6 +580,227 @@ def update_actor_residual_ppo(
             # GRPO stats
             'grpo/num_samples': float(G),
             'grpo/q_group_std': jnp.std(q_values, axis=0).mean(),
+            # BC regularization
+            'actor/rl_loss': pg_loss + entropy_loss,
+            'bc/reg_coeff': bc_reg_coeff,
+            'bc/weighted_loss': bc_reg_coeff * bc_loss_val,
+            **bc_info,
+        }
+        
+        return actor_loss, (info, new_model_state)
+    
+    grads, (info, new_model_state) = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
+    
+    # NaN guard: replace NaN/Inf in gradients with zeros
+    grads = _nan_to_num_tree(grads)
+    
+    if 'batch_stats' in new_model_state and new_model_state.get('batch_stats'):
+        new_actor = actor.apply_gradients(grads=grads, batch_stats=new_model_state['batch_stats'])
+    else:
+        new_actor = actor.apply_gradients(grads=grads)
+    
+    return new_actor, info
+
+
+def update_actor_residual_ppo_onpolicy(
+        key: PRNGKey,
+        actor: TrainState,
+        target_critic: TrainState,
+        batch: DatasetDict,
+        residual_alpha: float,
+        query_frequency: int,
+        action_dim: int,
+        clip_epsilon: float = 0.2,
+        clip_min_epsilon_multiplier: float = 1.0,
+        clip_max_epsilon_multiplier: float = 1.0,
+        entropy_coeff: float = 1e-3,
+        advantage_critic_reduction: str = 'mean',
+        normalize_advantages: bool = False,
+        log_ratio_clip: float = 20.0,
+        log_prob_clip: float = 50.0,
+        bc_flag: bool = False,
+        bc_reg_coeff: float = 0.0,
+        bc_on_success_only: bool = False,
+        predict_a_exec: bool = False,
+) -> Tuple[TrainState, Dict[str, float]]:
+    """On-policy PPO actor update using stored old_log_probs from the replay buffer.
+    
+    Bandit-style: uses raw Q values as advantages (no GRPO baseline subtraction).
+    The batch is sampled from the most recently collected trajectory, which means
+    the actions in the batch were taken by the behavior policy whose log_probs are
+    stored as batch['old_log_probs'].
+    
+    This gives proper importance weight ratios: pi_current(a|s) / pi_old(a|s).
+    
+    Args:
+        key: PRNG key.
+        actor: Current actor TrainState.
+        target_critic: Target critic TrainState (for Q values).
+        batch: Batch sampled from last trajectory, must contain:
+            - observations['base_action']: base actions
+            - actions: delta actions (residual) that were actually taken
+            - old_log_probs: log prob of those actions under the behavior policy
+        residual_alpha: Scaling factor for residual actions.
+        query_frequency: Query frequency (chunk length).
+        action_dim: Action dimension per step.
+        clip_epsilon: PPO clip epsilon.
+        entropy_coeff: Entropy bonus coefficient.
+        advantage_critic_reduction: 'min' or 'mean' for Q ensemble reduction.
+        normalize_advantages: Whether to normalize advantages.
+        log_ratio_clip: Clamp log_ratio to [-clip, clip] before exp.
+        log_prob_clip: Clamp log_probs to [-clip, clip].
+        
+    Returns:
+        Updated actor TrainState and info dict.
+    """
+    # Extract base actions from observations
+    base_action_raw = batch['observations']['base_action']
+    base_action = jnp.squeeze(base_action_raw, axis=-1)  # (B, T, A)
+    B, T, A = base_action.shape
+    action_dim_flat = query_frequency * action_dim
+    
+    # The stored actions that were actually executed
+    stored_actions = batch['actions']  # (B, query_frequency, action_dim)
+    stored_actions_flat = stored_actions.reshape(B, action_dim_flat)  # (B, action_dim_flat)
+    
+    # Stored old log probs from behavior policy
+    old_log_probs = batch['old_log_probs']  # (B,)
+    old_log_probs = jnp.clip(old_log_probs, -log_prob_clip, log_prob_clip)
+    
+    # Compute Q values for the stored actions (the actions that were actually taken)
+    stored_actions_chunked = stored_actions.reshape(B, query_frequency, action_dim)
+    if predict_a_exec:
+        # Stored actions ARE a_exec directly
+        a_exec = jnp.clip(stored_actions_chunked, -1.0, 1.0)
+    else:
+        # Original: stored actions are delta, compose a_exec
+        a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * stored_actions_chunked, -1.0, 1.0)
+    a_exec_flat = a_exec.reshape(B, action_dim_flat)
+    
+    qs = target_critic.apply_fn({'params': target_critic.params}, batch['observations'], a_exec_flat)
+    if advantage_critic_reduction == 'min':
+        q_values = qs.min(axis=0)  # (B,)
+    else:
+        q_values = qs.mean(axis=0)  # (B,)
+    
+    # Bandit-style: use raw Q as advantage (no baseline subtraction)
+    advantages = q_values  # (B,)
+    
+    # Optional advantage normalization
+    if normalize_advantages:
+        adv_std = jnp.std(advantages) + 1e-8
+        adv_mean = jnp.mean(advantages)
+        advantages = (advantages - adv_mean) / adv_std
+    
+    # Stop gradient on advantages and old_log_probs
+    advantages = jax.lax.stop_gradient(advantages)
+    old_log_probs = jax.lax.stop_gradient(old_log_probs)
+    
+    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, Tuple[Dict[str, float], Dict]]:
+        # Get current distribution
+        if hasattr(actor, 'batch_stats') and actor.batch_stats is not None:
+            dist, new_model_state = actor.apply_fn(
+                {'params': actor_params, 'batch_stats': actor.batch_stats},
+                batch['observations'],
+                mutable=['batch_stats']
+            )
+            if isinstance(dist, tuple):
+                dist = dist[0]
+        else:
+            dist = actor.apply_fn({'params': actor_params}, batch['observations'])
+            new_model_state = {}
+        
+        # Current log prob of the stored actions
+        log_probs = dist.log_prob(stored_actions_flat)  # (B,)
+        log_probs = jnp.clip(log_probs, -log_prob_clip, log_prob_clip)
+        
+        # PPO clipped loss with proper importance weights
+        log_ratio = log_probs - old_log_probs
+        log_ratio_clamped = jnp.clip(log_ratio, -log_ratio_clip, log_ratio_clip)
+        ratio = jnp.exp(log_ratio_clamped)
+        
+        lower_bound = 1.0 - clip_epsilon * clip_min_epsilon_multiplier
+        upper_bound = 1.0 + clip_epsilon * clip_max_epsilon_multiplier
+        clipped_ratio = jnp.clip(ratio, lower_bound, upper_bound)
+        
+        pg_loss = -jnp.mean(jnp.minimum(ratio * advantages, clipped_ratio * advantages))
+        
+        # Entropy from base distribution
+        base_entropy = dist.distribution.entropy()  # (B,)
+        mean_entropy = base_entropy.mean()
+        entropy_loss = -entropy_coeff * mean_entropy
+        
+        # BC regularization loss
+        bc_loss_val = jnp.array(0.0)
+        bc_info = {}
+        if bc_flag:
+            bc_loss_val, bc_info = compute_bc_loss_residual(
+                dist, batch, query_frequency, bc_on_success_only
+            )
+        
+        actor_loss = pg_loss + entropy_loss + bc_reg_coeff * bc_loss_val
+        
+        # Logging
+        mean_dist = dist.distribution._loc
+        std_diag_dist = dist.distribution._scale_diag
+        log_std_dist = jnp.log(std_diag_dist + 1e-8)
+        
+        approx_kl = ((ratio - 1) - log_ratio_clamped).mean()
+        ratio_clipped_upper = jnp.mean(ratio > upper_bound)
+        ratio_clipped_lower = jnp.mean(ratio < lower_bound)
+        log_ratio_clipped_frac = jnp.mean(jnp.abs(log_ratio) > log_ratio_clip)
+        
+        # Residual diagnostics
+        if predict_a_exec:
+            delta_derived = (a_exec - base_action[:, :query_frequency, :]) / jnp.maximum(jnp.abs(residual_alpha), 1e-8)
+            delta_norm = jnp.linalg.norm(delta_derived.reshape(B, -1), axis=-1)
+        else:
+            delta_norm = jnp.linalg.norm(stored_actions_flat, axis=-1)
+        base_flat = base_action[:, :query_frequency, :].reshape(B, action_dim_flat)
+        base_norm = jnp.linalg.norm(base_flat, axis=-1)
+        eff_delta_norm = jnp.abs(residual_alpha) * delta_norm
+        clipping_rate = (jnp.abs(a_exec) >= 1.0).mean()
+        
+        info = {
+            'actor_loss': actor_loss,
+            'pg_loss': pg_loss,
+            'entropy_loss': entropy_loss,
+            'entropy': mean_entropy,
+            'q_pi_in_actor': q_values.mean(),
+            'q_pi_std': q_values.std(),
+            'advantages_mean': advantages.mean(),
+            'advantages_std': advantages.std(),
+            'log_probs_mean': log_probs.mean(),
+            'log_probs_min': log_probs.min(),
+            'log_probs_max': log_probs.max(),
+            'old_log_probs_mean': old_log_probs.mean(),
+            'mean_pi_norm': jnp.linalg.norm(mean_dist, axis=-1).mean(),
+            'std_pi_norm': jnp.linalg.norm(std_diag_dist, axis=-1).mean(),
+            'mean_pi_avg': mean_dist.mean(),
+            'std_pi_avg': std_diag_dist.mean(),
+            'std_pi_min': std_diag_dist.min(),
+            'std_pi_max': std_diag_dist.max(),
+            'log_std_mean': log_std_dist.mean(),
+            'log_std_min': log_std_dist.min(),
+            'log_std_max': log_std_dist.max(),
+            # PPO stats
+            'ppo/ratio_mean': ratio.mean(),
+            'ppo/ratio_std': ratio.std(),
+            'ppo/ratio_min': ratio.min(),
+            'ppo/ratio_max': ratio.max(),
+            'ppo/approx_kl': approx_kl,
+            'ppo/ratio_clipped_upper': ratio_clipped_upper,
+            'ppo/ratio_clipped_lower': ratio_clipped_lower,
+            'ppo/log_ratio_mean': log_ratio.mean(),
+            'ppo/log_ratio_abs_max': jnp.abs(log_ratio).max(),
+            'ppo/log_ratio_clipped_frac': log_ratio_clipped_frac,
+            # Residual diagnostics
+            'actor/delta_norm_mean': delta_norm.mean(),
+            'actor/clipping_rate': clipping_rate,
+            'actor/effective_residual_norm': eff_delta_norm.mean(),
+            'collapse/ratio_eff_delta_to_base_mean': (eff_delta_norm / (base_norm + 1e-8)).mean(),
+            # On-policy PPO mode indicator
+            'ppo/on_policy': 1.0,
             # BC regularization
             'actor/rl_loss': pg_loss + entropy_loss,
             'bc/reg_coeff': bc_reg_coeff,

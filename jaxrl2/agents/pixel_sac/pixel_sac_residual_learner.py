@@ -50,7 +50,7 @@ class TrainState(train_state.TrainState):
     batch_stats: Any
 
 # @chex.chexify
-@functools.partial(jax.jit, static_argnames=('critic_reduction', 'color_jitter', 'aug_next', 'num_cameras', 'backup_entropy', 'query_frequency'))
+@functools.partial(jax.jit, static_argnames=('critic_reduction', 'color_jitter', 'aug_next', 'num_cameras', 'backup_entropy', 'query_frequency', 'predict_a_exec'))
 def _update_residual_jit(
     rng: PRNGKey, 
     actor: TrainState, 
@@ -68,6 +68,7 @@ def _update_residual_jit(
     num_cameras: int,
     backup_entropy: bool,
     query_frequency: int,
+    predict_a_exec: bool = False,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str, float]]:
     """JIT-compiled update function for Residual SAC."""
     
@@ -114,6 +115,7 @@ def _update_residual_jit(
     new_critic, critic_info = update_critic_residual(
         key, actor, critic, target_critic, temp, batch, 
         discount, residual_alpha, query_frequency, critic_reduction=critic_reduction, backup_entropy=backup_entropy,
+        predict_a_exec=predict_a_exec,
     )
     new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
     
@@ -121,7 +123,8 @@ def _update_residual_jit(
     key, rng = jax.random.split(rng)
     new_actor, actor_info = update_actor_residual(
         key, actor, new_critic, temp, batch, 
-        residual_alpha, query_frequency, critic_reduction=critic_reduction
+        residual_alpha, query_frequency, critic_reduction=critic_reduction,
+        predict_a_exec=predict_a_exec,
     )
     
     # Temperature update
@@ -138,7 +141,7 @@ def _update_residual_jit(
     jax.jit,
     static_argnames=(
         'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
-        'backup_entropy', 'query_frequency', 'use_huber_loss',
+        'backup_entropy', 'query_frequency', 'use_huber_loss', 'predict_a_exec',
     ),
 )
 def _update_critic_jit(
@@ -159,6 +162,7 @@ def _update_critic_jit(
     query_frequency: int,
     use_huber_loss: bool = False,
     huber_delta: float = 1.0,
+    predict_a_exec: bool = False,
 ) -> Tuple[PRNGKey, TrainState, Params, Dict[str, float]]:
     """JIT-compiled critic update for Residual SAC."""
     aug_pixels = batch['observations']['pixels']
@@ -213,6 +217,7 @@ def _update_critic_jit(
         backup_entropy=backup_entropy,
         use_huber_loss=use_huber_loss,
         huber_delta=huber_delta,
+        predict_a_exec=predict_a_exec,
     )
     new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
 
@@ -223,7 +228,7 @@ def _update_critic_jit(
     jax.jit,
     static_argnames=(
         'critic_reduction', 'color_jitter', 'num_cameras', 'query_frequency',
-        'bc_on_success_only', 'bc_flag',
+        'bc_on_success_only', 'bc_flag', 'predict_a_exec',
     ),
 )
 def _update_actor_jit(
@@ -241,6 +246,7 @@ def _update_actor_jit(
     bc_flag: bool,
     bc_reg_coeff: float,
     bc_on_success_only: bool,
+    predict_a_exec: bool = False,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Dict[str, float]]:
     """JIT-compiled actor + temperature update for Residual SAC."""
     aug_pixels = batch['observations']['pixels']
@@ -275,6 +281,7 @@ def _update_actor_jit(
         bc_flag=bc_flag,
         bc_reg_coeff=bc_reg_coeff,
         bc_on_success_only=bc_on_success_only,
+        predict_a_exec=predict_a_exec,
     )
 
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
@@ -331,6 +338,7 @@ class PixelSACResidualLearner(Agent):
                  num_actor_updates: int = 1,
                  bc_reg_coeff: float = 0.0,
                  bc_on_success_only: bool = False,
+                 predict_a_exec: bool = False,
                  ):
         """Initialize Residual SAC Learner.
         
@@ -389,6 +397,7 @@ class PixelSACResidualLearner(Agent):
         self.num_actor_updates = num_actor_updates
         self.bc_reg_coeff = bc_reg_coeff
         self.bc_on_success_only = bc_on_success_only
+        self.predict_a_exec = predict_a_exec
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
@@ -521,6 +530,7 @@ class PixelSACResidualLearner(Agent):
         print(f'  num_actor_updates: {self.num_actor_updates}')
         print(f'  bc_reg_coeff: {self.bc_reg_coeff}')
         print(f'  bc_on_success_only: {self.bc_on_success_only}')
+        print(f'  predict_a_exec: {self.predict_a_exec}')
 
     def update_critic(self, batch: FrozenDict) -> Dict[str, float]:
         """Perform a single critic update.
@@ -549,6 +559,7 @@ class PixelSACResidualLearner(Agent):
             self.query_frequency,
             self.use_huber_loss,
             self.huber_delta,
+            self.predict_a_exec,
         )
         self._rng = new_rng
         self._critic = new_critic
@@ -579,6 +590,7 @@ class PixelSACResidualLearner(Agent):
             bool(self.bc_reg_coeff > 0.0 ),
             self.bc_reg_coeff,
             self.bc_on_success_only,
+            self.predict_a_exec,
         )
         self._rng = new_rng
         self._actor = new_actor
@@ -637,10 +649,14 @@ class PixelSACResidualLearner(Agent):
 
                 # Compose executed action for Q evaluation
                 base_action_squeezed = base_action.squeeze(-1)  # (chunk_len, action_dim)
-                a_exec = np.clip(
-                    base_action_squeezed[:self.query_frequency] + self._residual_alpha * action.squeeze(0), 
-                    -1.0, 1.0
-                )
+                if self.predict_a_exec:
+                    # Stored actions ARE a_exec
+                    a_exec = np.clip(action.squeeze(0), -1.0, 1.0)
+                else:
+                    a_exec = np.clip(
+                        base_action_squeezed[:self.query_frequency] + self._residual_alpha * action.squeeze(0), 
+                        -1.0, 1.0
+                    )
                 a_exec_flat = a_exec.reshape(1, -1)
 
                 q_value = get_value_residual(a_exec_flat, obs_dict, self._critic)
@@ -660,6 +676,7 @@ class PixelSACResidualLearner(Agent):
             'temp': self._temp,
             'residual_alpha': self._residual_alpha,
             'algo': self.algo,
+            'predict_a_exec': self.predict_a_exec,
         }
         return save_dict
 
@@ -674,7 +691,9 @@ class PixelSACResidualLearner(Agent):
             self._residual_alpha = jnp.asarray(output_dict['residual_alpha'], dtype=jnp.float32)
         if 'algo' in output_dict:
             self.algo = output_dict['algo']
-        print(f'Restored residual SAC checkpoint from {dir} (algo: {self.algo})')
+        if 'predict_a_exec' in output_dict:
+            self.predict_a_exec = bool(output_dict['predict_a_exec'])
+        print(f'Restored residual SAC checkpoint from {dir} (algo: {self.algo}, predict_a_exec: {self.predict_a_exec})')
 
 
 @functools.partial(jax.jit)

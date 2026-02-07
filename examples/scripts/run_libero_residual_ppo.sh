@@ -81,4 +81,8 @@ python -m examples.launch_train_sim_residual \
     --bc_reg_coeff 0.0 \
     --bc_on_success_only 1 \
     --success_buffer_ratio 0.2 \
-    --success_buffer_min_size 50
+    --success_buffer_min_size 50 \
+    --on_policy_ppo 0 \
+    --normalize_advantages 0 \
+    --log_std_min -5.0 \
+    --log_std_max 2.0

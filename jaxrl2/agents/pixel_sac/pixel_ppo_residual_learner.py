@@ -37,7 +37,7 @@ from jaxrl2.networks.encoders.networks import Encoder, PixelMultiplexer
 from jaxrl2.networks.encoders.impala_encoder import ImpalaEncoder, SmallerImpalaEncoder
 from jaxrl2.networks.encoders.resnet_encoderv1 import ResNet18, ResNet34, ResNetSmall
 from jaxrl2.networks.encoders.resnet_encoderv2 import ResNetV2Encoder
-from jaxrl2.agents.pixel_sac.residual_actor_updater import update_actor_residual_ppo
+from jaxrl2.agents.pixel_sac.residual_actor_updater import update_actor_residual_ppo, update_actor_residual_ppo_onpolicy
 from jaxrl2.agents.pixel_sac.residual_critic_updater import update_critic_residual
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.networks.learned_std_normal_policy import LearnedStdTanhNormalPolicy
@@ -52,7 +52,7 @@ class TrainState(train_state.TrainState):
 
 @functools.partial(jax.jit, static_argnames=(
     'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
-    'query_frequency', 'use_huber_loss',
+    'query_frequency', 'use_huber_loss', 'predict_a_exec',
 ))
 def _update_critic_jit(
     rng: PRNGKey,
@@ -70,6 +70,7 @@ def _update_critic_jit(
     query_frequency: int,
     use_huber_loss: bool,
     huber_delta: float,
+    predict_a_exec: bool = False,
 ) -> Tuple[PRNGKey, TrainState, Params, Dict[str, float]]:
     """JIT-compiled critic update function."""
     
@@ -118,6 +119,7 @@ def _update_critic_jit(
         discount, residual_alpha, query_frequency,
         critic_reduction=critic_reduction, backup_entropy=False,
         use_huber_loss=use_huber_loss, huber_delta=huber_delta,
+        predict_a_exec=predict_a_exec,
     )
     new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
     
@@ -129,8 +131,9 @@ def _update_critic_jit(
     'query_frequency', 'action_dim', 'grpo_num_samples',
     'clip_epsilon', 'clip_min_epsilon_multiplier', 'clip_max_epsilon_multiplier',
     'entropy_coeff', 'advantage_critic_reduction', 'use_grpo_baseline',
+    'normalize_advantages',
     'adv_clip_min', 'adv_clip_max', 'log_ratio_clip', 'log_prob_clip',
-    'bc_on_success_only','bc_flag',
+    'bc_on_success_only','bc_flag', 'predict_a_exec',
 ))
 def _update_actor_jit(
     rng: PRNGKey,
@@ -151,6 +154,7 @@ def _update_actor_jit(
     entropy_coeff: float,
     advantage_critic_reduction: str,
     use_grpo_baseline: bool,
+    normalize_advantages: bool,
     adv_clip_min: Optional[float],
     adv_clip_max: Optional[float],
     log_ratio_clip: float,
@@ -158,6 +162,7 @@ def _update_actor_jit(
     bc_flag: bool,
     bc_reg_coeff: float,
     bc_on_success_only: bool,
+    predict_a_exec: bool = False,
 ) -> Tuple[PRNGKey, TrainState, Dict[str, float]]:
     """JIT-compiled actor update function (no target actor - uses stop_gradient)."""
     
@@ -194,6 +199,7 @@ def _update_actor_jit(
         entropy_coeff=entropy_coeff,
         advantage_critic_reduction=advantage_critic_reduction,
         use_grpo_baseline=use_grpo_baseline,
+        normalize_advantages=normalize_advantages,
         adv_clip_min=adv_clip_min,
         adv_clip_max=adv_clip_max,
         log_ratio_clip=log_ratio_clip,
@@ -201,9 +207,90 @@ def _update_actor_jit(
         bc_flag=bc_flag, 
         bc_reg_coeff=bc_reg_coeff,
         bc_on_success_only=bc_on_success_only,
+        predict_a_exec=predict_a_exec,
     )
     
     return rng, new_actor, actor_info
+
+
+@functools.partial(jax.jit, static_argnames=(
+    'color_jitter', 'aug_next', 'num_cameras',
+    'query_frequency', 'action_dim',
+    'clip_epsilon', 'clip_min_epsilon_multiplier', 'clip_max_epsilon_multiplier',
+    'entropy_coeff', 'advantage_critic_reduction',
+    'normalize_advantages',
+    'log_ratio_clip', 'log_prob_clip',
+    'bc_on_success_only', 'bc_flag', 'predict_a_exec',
+))
+def _update_actor_onpolicy_jit(
+    rng: PRNGKey,
+    actor: TrainState,
+    target_critic_params: Params,
+    critic: TrainState,
+    batch: DatasetDict,
+    residual_alpha: float,
+    color_jitter: bool,
+    aug_next: bool,
+    num_cameras: int,
+    query_frequency: int,
+    action_dim: int,
+    clip_epsilon: float,
+    clip_min_epsilon_multiplier: float,
+    clip_max_epsilon_multiplier: float,
+    entropy_coeff: float,
+    advantage_critic_reduction: str,
+    normalize_advantages: bool,
+    log_ratio_clip: float,
+    log_prob_clip: float,
+    bc_flag: bool,
+    bc_reg_coeff: float,
+    bc_on_success_only: bool,
+    predict_a_exec: bool = False,
+) -> Tuple[PRNGKey, TrainState, Dict[str, float]]:
+    """JIT-compiled on-policy PPO actor update using stored old_log_probs."""
+    
+    # Data augmentation for pixels
+    aug_pixels = batch['observations']['pixels']
+    
+    if batch['observations']['pixels'].squeeze().ndim != 2:
+        rng, key = jax.random.split(rng)
+        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
+
+        if color_jitter:
+            rng, key = jax.random.split(rng)
+            if num_cameras > 1:
+                for i in range(num_cameras):
+                    aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
+                        (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                    )
+            else:
+                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+
+    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
+    batch = batch.copy(add_or_replace={'observations': observations})
+    
+    # On-policy PPO actor update with stored old_log_probs
+    key, rng = jax.random.split(rng)
+    target_critic_for_actor = critic.replace(params=target_critic_params)
+    new_actor, actor_info = update_actor_residual_ppo_onpolicy(
+        key, actor, target_critic_for_actor, batch,
+        residual_alpha, query_frequency, action_dim,
+        clip_epsilon=clip_epsilon,
+        clip_min_epsilon_multiplier=clip_min_epsilon_multiplier,
+        clip_max_epsilon_multiplier=clip_max_epsilon_multiplier,
+        entropy_coeff=entropy_coeff,
+        advantage_critic_reduction=advantage_critic_reduction,
+        normalize_advantages=normalize_advantages,
+        log_ratio_clip=log_ratio_clip,
+        log_prob_clip=log_prob_clip,
+        bc_flag=bc_flag,
+        bc_reg_coeff=bc_reg_coeff,
+        bc_on_success_only=bc_on_success_only,
+        predict_a_exec=predict_a_exec,
+    )
+    
+    return rng, new_actor, actor_info
+
 
 class PixelPPOResidualLearner(Agent):
     """Residual Q-weighted PG / GRPO Learner for pixel observations.
@@ -245,6 +332,9 @@ class PixelPPOResidualLearner(Agent):
         # Residual
         residual_alpha: float = 1.0,
         action_magnitude: float = 0.1,
+        # Policy std bounds (NaN stability)
+        log_std_min: float = -5.0,
+        log_std_max: float = 2.0,
         # Data augmentation
         color_jitter: bool = True,
         aug_next: bool = True,
@@ -267,9 +357,14 @@ class PixelPPOResidualLearner(Agent):
         # Update ratio control (applied in training loop, not here)
         num_critic_updates: int = 2,
         num_actor_updates: int = 4,
+        # On-policy PPO flags
+        on_policy_ppo: bool = False,
+        normalize_advantages: bool = False,
         # BC regularization
         bc_reg_coeff: float = 0.0,
         bc_on_success_only: bool = False,
+        # Action prediction mode
+        predict_a_exec: bool = False,
         # Other
         decay_steps: Optional[int] = None,
         cnn_features: Sequence[int] = (32, 64, 128, 256),
@@ -353,6 +448,8 @@ class PixelPPOResidualLearner(Agent):
         policy_def = LearnedStdTanhNormalPolicy(
             hidden_dims, self.action_dim, 
             dropout_rate=dropout_rate, 
+            log_std_min=log_std_min,
+            log_std_max=log_std_max,
             low=-action_magnitude, 
             high=action_magnitude
         )
@@ -441,9 +538,16 @@ class PixelPPOResidualLearner(Agent):
         self.num_critic_updates = num_critic_updates
         self.num_actor_updates = num_actor_updates
         
+        # On-policy PPO flags
+        self.on_policy_ppo = on_policy_ppo
+        self.normalize_advantages = normalize_advantages
+        
         # BC regularization
         self.bc_reg_coeff = bc_reg_coeff
         self.bc_on_success_only = bc_on_success_only
+        
+        # Action prediction mode
+        self.predict_a_exec = predict_a_exec
 
         if algo == 'q_weighted_pg':
             assert grpo_num_samples >= 1
@@ -472,8 +576,11 @@ class PixelPPOResidualLearner(Agent):
         print(f'  huber_delta: {self.huber_delta}')
         print(f'  num_critic_updates: {self.num_critic_updates}')
         print(f'  num_actor_updates: {self.num_actor_updates}')
+        print(f'  on_policy_ppo: {self.on_policy_ppo}')
+        print(f'  normalize_advantages: {self.normalize_advantages}')
         print(f'  bc_reg_coeff: {self.bc_reg_coeff}')
         print(f'  bc_on_success_only: {self.bc_on_success_only}')
+        print(f'  predict_a_exec: {self.predict_a_exec}')
 
     def update_critic(self, batch: FrozenDict) -> Dict[str, float]:
         """Perform a single critic update.
@@ -500,6 +607,7 @@ class PixelPPOResidualLearner(Agent):
             self.query_frequency,
             self.use_huber_loss,
             self.huber_delta,
+            self.predict_a_exec,
         )
         self._rng = new_rng
         self._critic = new_critic
@@ -534,6 +642,7 @@ class PixelPPOResidualLearner(Agent):
             self.entropy_coeff,
             self.advantage_critic_reduction,
             self.use_grpo_baseline,
+            self.normalize_advantages,
             self.adv_clip_min,
             self.adv_clip_max,
             self.log_ratio_clip,
@@ -541,6 +650,48 @@ class PixelPPOResidualLearner(Agent):
             bool(self.bc_reg_coeff > 0.0),
             self.bc_reg_coeff,
             self.bc_on_success_only,
+            self.predict_a_exec,
+        )
+        self._rng = new_rng
+        self._actor = new_actor
+        return actor_info
+
+    def update_actor_onpolicy(self, batch: FrozenDict) -> Dict[str, float]:
+        """Perform a single on-policy PPO actor update.
+        
+        Uses stored old_log_probs from the batch (sampled from last trajectory).
+        Bandit-style: raw Q values as advantages, no GRPO baseline.
+        
+        Args:
+            batch: Batch sampled from last trajectory, must contain old_log_probs.
+            
+        Returns:
+            Dictionary of actor training metrics.
+        """
+        new_rng, new_actor, actor_info = _update_actor_onpolicy_jit(
+            self._rng,
+            self._actor,
+            self._target_critic_params,
+            self._critic,
+            batch,
+            self._residual_alpha,
+            self.color_jitter,
+            self.aug_next,
+            self.num_cameras,
+            self.query_frequency,
+            self.action_dim_per_step,
+            self.clip_epsilon,
+            self.clip_min_epsilon_multiplier,
+            self.clip_max_epsilon_multiplier,
+            self.entropy_coeff,
+            self.advantage_critic_reduction,
+            self.normalize_advantages,
+            self.log_ratio_clip,
+            self.log_prob_clip,
+            bool(self.bc_reg_coeff > 0.0),
+            self.bc_reg_coeff,
+            self.bc_on_success_only,
+            self.predict_a_exec,
         )
         self._rng = new_rng
         self._actor = new_actor
@@ -598,10 +749,14 @@ class PixelPPOResidualLearner(Agent):
 
                 # Compose executed action for Q evaluation
                 base_action_squeezed = base_action.squeeze(-1)  # (chunk_len, action_dim)
-                a_exec = np.clip(
-                    base_action_squeezed[:self.query_frequency] + self._residual_alpha * action.squeeze(0), 
-                    -1.0, 1.0
-                )
+                if self.predict_a_exec:
+                    # Stored actions ARE a_exec
+                    a_exec = np.clip(action.squeeze(0), -1.0, 1.0)
+                else:
+                    a_exec = np.clip(
+                        base_action_squeezed[:self.query_frequency] + self._residual_alpha * action.squeeze(0), 
+                        -1.0, 1.0
+                    )
                 a_exec_flat = a_exec.reshape(1, -1)
 
                 q_value = get_value_residual(a_exec_flat, obs_dict, self._critic)
@@ -620,6 +775,7 @@ class PixelPPOResidualLearner(Agent):
             'actor': self._actor,
             'residual_alpha': self._residual_alpha,
             'algo': self.algo,
+            'predict_a_exec': self.predict_a_exec,
         }
         return save_dict
 
@@ -633,7 +789,9 @@ class PixelPPOResidualLearner(Agent):
             self._residual_alpha = jnp.asarray(output_dict['residual_alpha'], dtype=jnp.float32)
         if 'algo' in output_dict:
             self.algo = output_dict['algo']
-        print(f'Restored residual PPO checkpoint from {dir} (algo: {self.algo})')
+        if 'predict_a_exec' in output_dict:
+            self.predict_a_exec = bool(output_dict['predict_a_exec'])
+        print(f'Restored residual PPO checkpoint from {dir} (algo: {self.algo}, predict_a_exec: {self.predict_a_exec})')
 
 
 @functools.partial(jax.jit)

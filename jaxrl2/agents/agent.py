@@ -5,7 +5,7 @@ import pathlib
 from flax.training.train_state import TrainState
 
 from jaxrl2.agents.common import (eval_actions_jit, eval_log_prob_jit, eval_mse_jit, eval_reward_function_jit,
-                                  sample_actions_jit)
+                                  sample_actions_jit, sample_actions_with_log_prob_jit)
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.types import PRNGKey
 
@@ -44,6 +44,19 @@ class Agent(object):
 
         self._rng = rng
         return np.asarray(actions)
+
+    def sample_actions_with_log_prob(self, observations: np.ndarray):
+        """Sample actions and return their log probabilities.
+        
+        Returns:
+            (actions, log_probs) as numpy arrays.
+        """
+        rng, actions, log_probs = sample_actions_with_log_prob_jit(
+            self._rng, self._actor.apply_fn,
+            self._actor.params, observations, get_batch_stats(self._actor))
+
+        self._rng = rng
+        return np.asarray(actions), np.asarray(log_probs)
 
     @property
     def _save_dict(self):

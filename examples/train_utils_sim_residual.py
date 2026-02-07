@@ -195,6 +195,7 @@ def trajwise_alternating_training_loop_residual(
 
     total_env_steps = 0
     i = 0
+    on_policy_ppo = variant.get('on_policy_ppo', False)
     wandb_logger.log({'num_online_samples': 0}, step=i)
     wandb_logger.log({'num_online_trajs': 0}, step=i)
     wandb_logger.log({'env_steps': 0}, step=i)
@@ -238,16 +239,25 @@ def trajwise_alternating_training_loop_residual(
                         critic_info = agent.update_critic(batch)
 
                     # Actor updates: num_actor_updates per gradient step
-                    # Actor uses mixed batch (main + success buffer) when available
                     actor_info = {}
-                    for _ in range(num_actor_updates):
-                        actor_batch = _sample_actor_batch(
-                            replay_buffer, success_replay_buffer,
-                            variant.batch_size, success_buffer_ratio,
-                            success_buffer_min_size, use_success_buffer,
-                            shard_fn,
-                        )
-                        actor_info = agent.update_actor(actor_batch)
+                    if on_policy_ppo:
+                        # On-policy PPO: sample from last trajectory with stored log_probs
+                        for _ in range(num_actor_updates):
+                            actor_batch = online_replay_buffer.sample_from_last_traj(variant.batch_size)
+                            actor_batch = jax.device_put(actor_batch)
+                            if shard_fn is not None:
+                                actor_batch = shard_fn(actor_batch)
+                            actor_info = agent.update_actor_onpolicy(actor_batch)
+                    else:
+                        # Off-policy: sample from full buffer (original GRPO/QPG path)
+                        for _ in range(num_actor_updates):
+                            actor_batch = _sample_actor_batch(
+                                replay_buffer, success_replay_buffer,
+                                variant.batch_size, success_buffer_ratio,
+                                success_buffer_min_size, use_success_buffer,
+                                shard_fn,
+                            )
+                            actor_info = agent.update_actor(actor_batch)
 
                     # Combine info for logging
                     update_info = {**critic_info, **actor_info}
@@ -299,20 +309,22 @@ def add_online_data_to_buffer_residual(variant, traj, online_replay_buffer, succ
     
     Stores:
         - observations with 'base_action' (chunk from frozen policy)
-        - actions = delta_actions (residual)
+        - actions = delta_actions (residual) or a_exec (if predict_a_exec=True)
         - rewards, masks, discount
         - success_flag: 1.0 if this episode was successful, 0.0 otherwise
+        - old_log_probs: log probability of the action under the behavior policy
     
     If success_replay_buffer is provided and the trajectory was successful,
     transitions are also added to the success buffer.
     """
     discount_horizon = variant.query_freq
-    actions = np.array(traj['actions'])  # (B, query_freq, action_dim) - these are delta actions
+    actions = np.array(traj['actions'])  # (B, query_freq, action_dim) - delta or a_exec depending on predict_a_exec
     base_actions = np.array(traj['base_actions'])  # (B, chunk_len, action_dim)
     episode_len = len(actions)
     rewards = np.array(traj['rewards'])
     masks = np.array(traj['masks'])
     is_success = float(traj['is_success'])
+    old_log_probs = np.array(traj.get('old_log_probs', np.zeros(episode_len)))
 
     for t in range(episode_len):
         obs = traj['observations'][t]
@@ -337,12 +349,13 @@ def add_online_data_to_buffer_residual(variant, traj, online_replay_buffer, succ
         insert_dict = dict(
             observations=obs,
             next_observations=next_obs,
-            actions=actions[t],  # delta_action
+            actions=actions[t],  # delta_action or a_exec (depending on predict_a_exec)
             next_actions=actions[t + 1] if t < episode_len - 1 else actions[t],
             rewards=rewards[t],
             masks=masks[t],
             discount=variant.discount ** discount_horizon,
             success_flag=is_success,
+            old_log_probs=old_log_probs[t],
         )
         online_replay_buffer.insert(insert_dict)
         
@@ -373,12 +386,15 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
         
     Returns:
         Trajectory dict with observations, base_actions, actions (delta), rewards, etc.
+        If on_policy_ppo=True, also includes old_log_probs.
     """
     query_frequency = variant.query_freq
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
     residual_alpha =  float(agent._residual_alpha)
     chunk_len = variant.chunk_len  # e.g., 10 for Pi-0.5
+    on_policy_ppo = variant.get('on_policy_ppo', False)
+    predict_a_exec = variant.get('predict_a_exec', False)
     
     # Flag to control initial exploration behavior
     use_zero_residual_initially = variant.get('use_zero_residual_initially', True)
@@ -395,6 +411,7 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
     action_list = []  # delta actions
     base_action_list = []  # base actions from Pi-0.5
     obs_list = []
+    old_log_probs_list = []  # log probs from behavior policy (for on-policy PPO)
 
     for t in tqdm(range(max_timesteps)):
         curr_image = obs_to_img(obs, variant)
@@ -420,35 +437,59 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
                     'base_action': base_actions[np.newaxis, ..., np.newaxis],
                 }
             
-            # 3. Sample residual (delta) actions from SAC
+            # 3. Sample actions from SAC
             rng, key = jax.random.split(rng)
             if i == 0 and use_zero_residual_initially:
                 # First trajectory: zero residual to evaluate base policy
                 delta_actions = np.zeros((query_frequency, variant.action_dim))
+                log_prob = 0.0  # not meaningful since we're not actually sampling, but set to 0 for consistency #TODO Verify if this causes any issues with on-policy PPO updates
                 print(f"[t={t}] Using zero residual for initial evaluation")
+                # Compose executed action (base only)
+                actions = np.clip(base_actions[:query_frequency], -1.0, 1.0)
             else:
-                # SAC samples residual
-                delta_actions_flat = agent.sample_actions(obs_dict)  # (1, query_frequency * action_dim)
-                delta_actions = np.reshape(delta_actions_flat, (query_frequency, variant.action_dim))
+                # SAC samples actions
+                if on_policy_ppo:
+                    actions_flat, log_prob = agent.sample_actions_with_log_prob(obs_dict)
+                    # log_prob is (1,) for single obs, squeeze to scalar
+                    log_prob = float(np.squeeze(log_prob))
+                else:
+                    actions_flat = agent.sample_actions(obs_dict)  # (1, query_frequency * action_dim)
+                    log_prob = 0.0  # not needed for off-policy
+                raw_actions = np.reshape(actions_flat, (query_frequency, variant.action_dim))
                 
                 # NaN guard: if action contains NaN/Inf, replace with zeros
-                if not np.all(np.isfinite(delta_actions)):
-                    print(f"[WARNING] NaN/Inf detected in delta_actions at t={t}, replacing with zeros")
-                    delta_actions = np.nan_to_num(delta_actions, nan=0.0, posinf=0.0, neginf=0.0)
-            
-            # 4. Compose executed action
-            actions = np.clip(base_actions[:query_frequency] + residual_alpha * delta_actions, -1.0, 1.0)
+                if not np.all(np.isfinite(raw_actions)):
+                    print(f"[WARNING] NaN/Inf detected in actions at t={t}, replacing with zeros")
+                    raw_actions = np.nan_to_num(raw_actions, nan=0.0, posinf=0.0, neginf=0.0)
+                    log_prob = 0.0  # invalidated by NaN replacement
+                
+                if predict_a_exec:
+                    # Actor predicts a_exec directly
+                    actions = np.clip(raw_actions, -1.0, 1.0)
+                    delta_actions = raw_actions  # store raw actor output (which IS a_exec)
+                else:
+                    # Original: actor predicts delta, compose a_exec
+                    delta_actions = raw_actions
+                    actions = np.clip(base_actions[:query_frequency] + residual_alpha * delta_actions, -1.0, 1.0)
             
             # Store for replay buffer
-            action_list.append(delta_actions)  # Store residual
+            if predict_a_exec:
+                action_list.append(actions)  # Store a_exec
+            else:
+                action_list.append(delta_actions)  # Store residual
             base_action_list.append(base_actions)  # Store base action
             obs_list.append(obs_dict)
+            old_log_probs_list.append(log_prob)  # Store log_prob from behavior policy
             
             # Log residual stats occasionally
             if t == 0:
-                delta_norm = np.linalg.norm(delta_actions)
+                if predict_a_exec:
+                    delta_from_base = actions - base_actions[:query_frequency]
+                    delta_norm = np.linalg.norm(delta_from_base)
+                else:
+                    delta_norm = np.linalg.norm(delta_actions)
                 base_norm = np.linalg.norm(base_actions)
-                print(f"[t={t}] base_norm={base_norm:.4f}, delta_norm={delta_norm:.4f}, alpha={residual_alpha}")
+                print(f"[t={t}] base_norm={base_norm:.4f}, delta_norm={delta_norm:.4f}, alpha={residual_alpha}, predict_a_exec={predict_a_exec}")
      
         action_t = actions[t % query_frequency]
         
@@ -497,14 +538,15 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
 
     return {
         'observations': obs_list,
-        'actions': action_list,  # delta actions (residual)
+        'actions': action_list,  # delta actions (if predict_a_exec=False) or a_exec (if predict_a_exec=True)
         'base_actions': base_action_list,  # base actions from Pi-0.5
         'rewards': rewards,
         'masks': masks,
         'is_success': is_success,
         'episode_return': episode_return,
         'images': image_list,
-        'env_steps': t + 1 
+        'env_steps': t + 1,
+        'old_log_probs': old_log_probs_list,  # log probs from behavior policy
     }
 
 
@@ -519,6 +561,7 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
     env_max_reward = variant.env_max_reward
     residual_alpha =  float(agent._residual_alpha)
     chunk_len = variant.chunk_len
+    predict_a_exec = variant.get('predict_a_exec', False)
     
     episode_returns = []
     highest_rewards = []
@@ -571,18 +614,27 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
                 if i == 0:
                     # Initial evaluation: zero residual to test base policy
                     delta_actions = np.zeros((query_frequency, variant.action_dim))
+                    actions = np.clip(base_actions[:query_frequency], -1.0, 1.0)
                 else:
                     # SAC samples residual (deterministic: use mean)
-                    delta_actions_flat = agent.eval_actions(obs_dict)  # Use eval_actions for deterministic
-                    delta_actions = np.reshape(delta_actions_flat, (query_frequency, variant.action_dim))
+                    actions_flat = agent.eval_actions(obs_dict)  # Use eval_actions for deterministic
+                    raw_actions = np.reshape(actions_flat, (query_frequency, variant.action_dim))
                     
                     # NaN guard: if action contains NaN/Inf, replace with zeros
-                    if not np.all(np.isfinite(delta_actions)):
-                        print(f"[WARNING] NaN/Inf detected in eval delta_actions at t={t}, replacing with zeros")
-                        delta_actions = np.nan_to_num(delta_actions, nan=0.0, posinf=0.0, neginf=0.0)
+                    if not np.all(np.isfinite(raw_actions)):
+                        print(f"[WARNING] NaN/Inf detected in eval actions at t={t}, replacing with zeros")
+                        raw_actions = np.nan_to_num(raw_actions, nan=0.0, posinf=0.0, neginf=0.0)
+                    
+                    if predict_a_exec:
+                        # Actor predicts a_exec directly
+                        actions = np.clip(raw_actions, -1.0, 1.0)
+                        delta_actions = actions - base_actions[:query_frequency]
+                    else:
+                        # Original: actor predicts delta, compose a_exec
+                        delta_actions = raw_actions
+                        actions = np.clip(base_actions[:query_frequency] + residual_alpha * delta_actions, -1.0, 1.0)
                 
-                # 3. Compose executed action
-                actions = np.clip(base_actions[:query_frequency] + residual_alpha * delta_actions, -1.0, 1.0)
+                # 3. Compose executed action (already done above)
                 
                 # Track statistics
                 delta_norm = np.linalg.norm(delta_actions.flatten())
