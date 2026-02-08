@@ -548,6 +548,13 @@ class PixelPPOResidualLearner(Agent):
         
         # Action prediction mode
         self.predict_a_exec = predict_a_exec
+        
+        # Validate predict_a_exec configuration
+        if predict_a_exec:
+            print(f'[WARNING] predict_a_exec=True: residual_alpha={residual_alpha} is IGNORED '
+                  f'for action composition. Actor predicts a_exec directly.')
+            assert residual_alpha is not None, \
+                'residual_alpha must still be provided (used only for logging diagnostics)'
 
         if algo == 'q_weighted_pg':
             assert grpo_num_samples >= 1

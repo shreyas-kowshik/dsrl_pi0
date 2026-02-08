@@ -49,93 +49,6 @@ from jaxrl2.utils.target_update import soft_target_update
 class TrainState(train_state.TrainState):
     batch_stats: Any
 
-# @chex.chexify
-@functools.partial(jax.jit, static_argnames=('critic_reduction', 'color_jitter', 'aug_next', 'num_cameras', 'backup_entropy', 'query_frequency', 'predict_a_exec'))
-def _update_residual_jit(
-    rng: PRNGKey, 
-    actor: TrainState, 
-    critic: TrainState,
-    target_critic_params: Params, 
-    temp: TrainState, 
-    batch: TrainState,
-    discount: float, 
-    tau: float, 
-    target_entropy: float,
-    residual_alpha: float,
-    critic_reduction: str, 
-    color_jitter: bool, 
-    aug_next: bool, 
-    num_cameras: int,
-    backup_entropy: bool,
-    query_frequency: int,
-    predict_a_exec: bool = False,
-) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str, float]]:
-    """JIT-compiled update function for Residual SAC."""
-    
-    # Data augmentation for pixels
-    aug_pixels = batch['observations']['pixels']
-    aug_next_pixels = batch['next_observations']['pixels']
-    
-    if batch['observations']['pixels'].squeeze().ndim != 2:
-        rng, key = jax.random.split(rng)
-        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
-
-        if color_jitter:
-            rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
-                        (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-                    )
-            else:
-                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-
-    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
-    batch = batch.copy(add_or_replace={'observations': observations})
-
-    key, rng = jax.random.split(rng)
-    if aug_next:
-        rng, key = jax.random.split(rng)
-        aug_next_pixels = batched_random_crop(key, batch['next_observations']['pixels'])
-        if color_jitter:
-            rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_next_pixels = aug_next_pixels.at[:, :, :, i*3:(i+1)*3].set(
-                        (color_transform(key, aug_next_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-                    )
-            else:
-                aug_next_pixels = (color_transform(key, aug_next_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-        next_observations = batch['next_observations'].copy(add_or_replace={'pixels': aug_next_pixels})
-        batch = batch.copy(add_or_replace={'next_observations': next_observations})
-    
-    # Critic update with residual action composition
-    key, rng = jax.random.split(rng)
-    target_critic = critic.replace(params=target_critic_params)
-    new_critic, critic_info = update_critic_residual(
-        key, actor, critic, target_critic, temp, batch, 
-        discount, residual_alpha, query_frequency, critic_reduction=critic_reduction, backup_entropy=backup_entropy,
-        predict_a_exec=predict_a_exec,
-    )
-    new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
-    
-    # Actor update with residual action composition
-    key, rng = jax.random.split(rng)
-    new_actor, actor_info = update_actor_residual(
-        key, actor, new_critic, temp, batch, 
-        residual_alpha, query_frequency, critic_reduction=critic_reduction,
-        predict_a_exec=predict_a_exec,
-    )
-    
-    # Temperature update
-    new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
-
-    return rng, new_actor, new_critic, new_target_critic_params, new_temp, {
-        **critic_info,
-        **actor_info,
-        **alpha_info
-    }
-
 
 @functools.partial(
     jax.jit,
@@ -339,6 +252,8 @@ class PixelSACResidualLearner(Agent):
                  bc_reg_coeff: float = 0.0,
                  bc_on_success_only: bool = False,
                  predict_a_exec: bool = False,
+                 log_std_min: float = -5.0,
+                 log_std_max: float = 2.0,
                  ):
         """Initialize Residual SAC Learner.
         
@@ -374,6 +289,13 @@ class PixelSACResidualLearner(Agent):
             num_cameras: Number of cameras (for multi-view augmentation)
             backup_entropy: Whether to backup entropy in critic updates.
         """
+        
+        # Validate predict_a_exec configuration
+        if predict_a_exec:
+            print(f'[WARNING] predict_a_exec=True: residual_alpha={residual_alpha} is IGNORED '
+                  f'for action composition. Actor predicts a_exec directly.')
+            assert residual_alpha is not None, \
+                'residual_alpha must still be provided (used only for logging diagnostics)'
         
         self._residual_alpha = jnp.asarray(residual_alpha, dtype=jnp.float32)
         self.aug_next = aug_next
@@ -436,6 +358,8 @@ class PixelSACResidualLearner(Agent):
         policy_def = LearnedStdTanhNormalPolicy(
             hidden_dims, self.action_dim, 
             dropout_rate=dropout_rate, 
+            log_std_min=log_std_min,
+            log_std_max=log_std_max,
             low=-action_magnitude, 
             high=action_magnitude
         )
@@ -531,6 +455,8 @@ class PixelSACResidualLearner(Agent):
         print(f'  bc_reg_coeff: {self.bc_reg_coeff}')
         print(f'  bc_on_success_only: {self.bc_on_success_only}')
         print(f'  predict_a_exec: {self.predict_a_exec}')
+        print(f'  log_std_min: {log_std_min}')
+        print(f'  log_std_max: {log_std_max}')
 
     def update_critic(self, batch: FrozenDict) -> Dict[str, float]:
         """Perform a single critic update.

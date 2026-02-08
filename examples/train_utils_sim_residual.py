@@ -13,6 +13,7 @@ from tqdm import tqdm
 import numpy as np
 import wandb
 import jax
+import jax.numpy as jnp
 from openpi_client import image_tools
 import math
 import PIL
@@ -442,8 +443,23 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
             if i == 0 and use_zero_residual_initially:
                 # First trajectory: zero residual to evaluate base policy
                 delta_actions = np.zeros((query_frequency, variant.action_dim))
-                log_prob = 0.0  # not meaningful since we're not actually sampling, but set to 0 for consistency #TODO Verify if this causes any issues with on-policy PPO updates
-                print(f"[t={t}] Using zero residual for initial evaluation")
+                
+                # Compute actual log_prob of zero/base actions under current policy
+                # so on-policy PPO importance weights are correct
+                if predict_a_exec:
+                    # When predicting a_exec, the "action" stored is base_action itself
+                    eval_actions_flat = np.clip(base_actions[:query_frequency], -1.0, 1.0).reshape(1, -1)
+                else:
+                    # When predicting delta, the stored action is zeros
+                    eval_actions_flat = delta_actions.reshape(1, -1)
+                dist = agent._actor.apply_fn(
+                    {'params': agent._actor.params}, obs_dict
+                )
+                log_prob = float(dist.log_prob(jnp.array(eval_actions_flat)).squeeze())
+                # Clamp for safety (very negative log_probs are fine, but avoid ±inf)
+                log_prob = float(np.clip(log_prob, -50.0, 50.0))
+                
+                print(f"[t={t}] Using zero residual for initial evaluation (log_prob={log_prob:.4f})")
                 # Compose executed action (base only)
                 actions = np.clip(base_actions[:query_frequency], -1.0, 1.0)
             else:

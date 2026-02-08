@@ -27,9 +27,14 @@ def _cosine_sim(a, b, eps=1e-8):
 
 
 def _nan_to_num_tree(tree):
-    """Apply nan_to_num to all leaves in a pytree."""
+    """Apply nan_to_num to all leaves in a pytree.
+    
+    Safety net only — this should ideally never be triggered.
+    Uses posinf=0, neginf=0 to avoid injecting large values that
+    cause secondary parameter explosions.
+    """
     return jax.tree_util.tree_map(
-        lambda x: jnp.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6), 
+        lambda x: jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), 
         tree
     )
 
@@ -105,8 +110,8 @@ def update_critic_residual(
         # Actor predicts a_exec directly; stored actions ARE a_exec
         a_exec = stored_action  # already a_exec, just clip for safety
         a_exec = jnp.clip(a_exec, -1.0, 1.0)
-        # Back-derive delta for logging
-        delta_action = (a_exec - base_action[:, :query_frequency, :]) / jnp.maximum(jnp.abs(residual_alpha), 1e-8)
+        # Back-derive delta for logging (no residual_alpha involved)
+        delta_action = a_exec - base_action[:, :query_frequency, :]
     else:
         # Original formulation: stored actions are delta, compose a_exec
         delta_action = stored_action

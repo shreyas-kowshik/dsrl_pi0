@@ -120,7 +120,7 @@ def update_actor_residual(
         if predict_a_exec:
             # Actor predicts a_exec directly
             a_exec = jnp.clip(actions_chunked, -1.0, 1.0)
-            delta_actions_chunked = (a_exec - base_action[:, :query_frequency, :]) / jnp.maximum(jnp.abs(residual_alpha), 1e-8)
+            delta_actions_chunked = (a_exec - base_action[:, :query_frequency, :])
         else:
             # Original: actor predicts delta, compose a_exec
             delta_actions_chunked = actions_chunked
@@ -181,7 +181,10 @@ def update_actor_residual(
         exec_norm  = jnp.linalg.norm(a_exec_flat, axis=-1)         # (B,)
 
         # "Effective" residual magnitude after scaling
-        eff_delta_norm = jnp.abs(residual_alpha) * delta_norm      # (B,)
+        # When predict_a_exec, delta IS the actual exec change, no scaling needed
+        eff_delta_norm = jnp.where(
+            predict_a_exec, delta_norm, jnp.abs(residual_alpha) * delta_norm
+        )  # (B,)
 
         # Ratio tells you collapse (<~0.05) vs dominance (>~1)
         ratio_eff_delta_to_base = eff_delta_norm / (base_norm + 1e-8)
@@ -245,6 +248,14 @@ def update_actor_residual(
 
     grads, (info, new_model_state) = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
     
+    # NaN detection logging (no masking — let it crash so we can diagnose)
+    grad_leaves = jax.tree_util.tree_leaves(grads)
+    has_nan_grad = jnp.any(jnp.array([jnp.any(jnp.isnan(g)) for g in grad_leaves]))
+    has_inf_grad = jnp.any(jnp.array([jnp.any(jnp.isinf(g)) for g in grad_leaves]))
+    info['debug/actor_grad_has_nan'] = has_nan_grad.astype(jnp.float32)
+    info['debug/actor_grad_has_inf'] = has_inf_grad.astype(jnp.float32)
+    info['debug/actor_loss_is_nan'] = jnp.isnan(info['actor_loss']).astype(jnp.float32)
+    
     if 'batch_stats' in new_model_state:
         new_actor = actor.apply_gradients(grads=grads, batch_stats=new_model_state['batch_stats'])
     else:
@@ -259,7 +270,10 @@ def compute_bc_loss_residual(
         query_frequency: int,
         bc_on_success_only: bool = False,
 ) -> Tuple[jnp.ndarray, Dict[str, float]]:
-    """Compute BC regularization loss (negative log-likelihood of stored actions).
+    """Compute BC regularization loss (MSE between policy mode and stored actions).
+    
+    Uses MSE instead of NLL to avoid numerical issues with atanh(±1) = ±∞
+    when stored actions are near the action bounds.
     
     Encourages the actor to reproduce the stored delta (residual) actions from
     the replay buffer, which are the actions that led to the observed transitions.
@@ -278,7 +292,7 @@ def compute_bc_loss_residual(
         bc_on_success_only: If True, only compute BC loss on success transitions.
         
     Returns:
-        bc_loss: Scalar BC loss (mean NLL, possibly masked).
+        bc_loss: Scalar BC loss (MSE, possibly masked).
         info: Dict with BC diagnostics.
     """
     # Stored delta actions: (B, query_frequency, action_dim) -> flatten to (B, query_freq * action_dim)
@@ -286,26 +300,32 @@ def compute_bc_loss_residual(
     B = stored_actions.shape[0]
     stored_actions_flat = stored_actions.reshape(B, -1)  # (B, query_freq * action_dim)
     
-    # NLL of stored actions under current policy
-    log_probs = dist.log_prob(stored_actions_flat)  # (B,)
-    nll = -log_probs  # (B,)
+    # Policy mode (deterministic action): tanh(mean) rescaled to [low, high]
+    # This avoids log_prob/atanh which causes NaN at action boundaries
+    policy_mode = dist.mode()  # (B, action_dim_flat)
+    
+    # Per-sample MSE: mean over action dimensions, keep batch dim
+    mse_per_sample = jnp.mean((policy_mode - stored_actions_flat) ** 2, axis=-1)  # (B,)
     
     if bc_on_success_only:
         # Mask: only include transitions from successful episodes
         success_mask = batch['success_flag']  # (B,)
         num_success = jnp.sum(success_mask) + 1e-8  # avoid div by zero
-        bc_loss = jnp.sum(nll * success_mask) / num_success
+        bc_loss = jnp.sum(mse_per_sample * success_mask) / num_success
         bc_frac = jnp.mean(success_mask)
     else:
-        bc_loss = jnp.mean(nll)
+        bc_loss = jnp.mean(mse_per_sample)
         bc_frac = 1.0
     
     info = {
         'bc/loss': bc_loss,
-        'bc/nll_mean': jnp.mean(nll),
-        'bc/nll_max': jnp.max(nll),
-        'bc/nll_min': jnp.min(nll),
-        'bc/log_prob_mean': jnp.mean(log_probs),
+        'bc/mse_mean': jnp.mean(mse_per_sample),
+        'bc/mse_max': jnp.max(mse_per_sample),
+        'bc/mse_min': jnp.min(mse_per_sample),
+        'bc/mode_mean': jnp.mean(policy_mode),
+        'bc/mode_std': jnp.std(policy_mode),
+        'bc/stored_action_mean': jnp.mean(stored_actions_flat),
+        'bc/stored_action_std': jnp.std(stored_actions_flat),
         'bc/success_frac_in_batch': bc_frac,
     }
     
@@ -313,9 +333,14 @@ def compute_bc_loss_residual(
 
 
 def _nan_to_num_tree(tree):
-    """Apply nan_to_num to all leaves in a pytree."""
+    """Apply nan_to_num to all leaves in a pytree.
+    
+    Safety net only — this should ideally never be triggered.
+    Uses posinf=0, neginf=0 to avoid injecting large values that
+    cause secondary parameter explosions.
+    """
     return jax.tree_util.tree_map(
-        lambda x: jnp.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6), 
+        lambda x: jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), 
         tree
     )
 
@@ -528,14 +553,17 @@ def update_actor_residual_ppo(
         delta_chunked = delta_sample.reshape(B, query_frequency, action_dim)
         if predict_a_exec:
             a_exec = jnp.clip(delta_chunked, -1.0, 1.0)
-            delta_for_logging = (a_exec - base_action[:, :query_frequency, :]) / jnp.maximum(jnp.abs(residual_alpha), 1e-8)
+            delta_for_logging = a_exec - base_action[:, :query_frequency, :]
             delta_norm = jnp.linalg.norm(delta_for_logging.reshape(B, -1), axis=-1)
         else:
             a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * delta_chunked, -1.0, 1.0)
             delta_norm = jnp.linalg.norm(delta_sample, axis=-1)
         base_flat = base_action[:, :query_frequency, :].reshape(B, query_frequency * action_dim)
         base_norm = jnp.linalg.norm(base_flat, axis=-1)
-        eff_delta_norm = jnp.abs(residual_alpha) * delta_norm
+        # When predict_a_exec, delta IS the actual exec change, no scaling needed
+        eff_delta_norm = jnp.where(
+            predict_a_exec, delta_norm, jnp.abs(residual_alpha) * delta_norm
+        )
         clipping_rate = (jnp.abs(a_exec) >= 1.0).mean()
         
         info = {
@@ -752,13 +780,16 @@ def update_actor_residual_ppo_onpolicy(
         
         # Residual diagnostics
         if predict_a_exec:
-            delta_derived = (a_exec - base_action[:, :query_frequency, :]) / jnp.maximum(jnp.abs(residual_alpha), 1e-8)
+            delta_derived = a_exec - base_action[:, :query_frequency, :]
             delta_norm = jnp.linalg.norm(delta_derived.reshape(B, -1), axis=-1)
         else:
             delta_norm = jnp.linalg.norm(stored_actions_flat, axis=-1)
         base_flat = base_action[:, :query_frequency, :].reshape(B, action_dim_flat)
         base_norm = jnp.linalg.norm(base_flat, axis=-1)
-        eff_delta_norm = jnp.abs(residual_alpha) * delta_norm
+        # When predict_a_exec, delta IS the actual exec change, no scaling needed
+        eff_delta_norm = jnp.where(
+            predict_a_exec, delta_norm, jnp.abs(residual_alpha) * delta_norm
+        )
         clipping_rate = (jnp.abs(a_exec) >= 1.0).mean()
         
         info = {
