@@ -197,6 +197,16 @@ def trajwise_alternating_training_loop_residual(
     total_env_steps = 0
     i = 0
     on_policy_ppo = variant.get('on_policy_ppo', False)
+    
+    # BC warmup configuration
+    bc_warmup_steps = variant.get('bc_warmup_steps', 0)
+    bc_warmup_num_critic_updates = variant.get('bc_warmup_num_critic_updates', 10)
+    bc_warmup_num_actor_updates = variant.get('bc_warmup_num_actor_updates', 1)
+    if bc_warmup_steps > 0:
+        print(f'[BC Warmup] Enabled: warmup_steps={bc_warmup_steps}, '
+              f'critic_updates={bc_warmup_num_critic_updates}, '
+              f'actor_updates={bc_warmup_num_actor_updates}')
+    
     wandb_logger.log({'num_online_samples': 0}, step=i)
     wandb_logger.log({'num_online_trajs': 0}, step=i)
     wandb_logger.log({'env_steps': 0}, step=i)
@@ -232,18 +242,35 @@ def trajwise_alternating_training_loop_residual(
                         agent.perform_eval(variant, i, wandb_logger, replay_buffer, replay_buffer_iterator, eval_env)
 
                 for _ in tqdm(range(num_gradsteps), desc='gradsteps', leave=False):
-                    # Critic updates: num_critic_updates per gradient step
-                    # Critic uses ONLY the main buffer (no success buffer mixing)
+                    # Determine if we're in BC warmup phase
+                    in_bc_warmup = (bc_warmup_steps > 0 and i < bc_warmup_steps)
+                    
+                    # Select update ratios based on phase
+                    if in_bc_warmup:
+                        curr_num_critic_updates = bc_warmup_num_critic_updates
+                        curr_num_actor_updates = bc_warmup_num_actor_updates
+                    else:
+                        curr_num_critic_updates = num_critic_updates
+                        curr_num_actor_updates = num_actor_updates
+                    
+                    # Critic updates: always TD learning (aggressive during warmup)
                     critic_info = {}
-                    for _ in range(num_critic_updates):
+                    for _ in range(curr_num_critic_updates):
                         batch = next(replay_buffer_iterator)
                         critic_info = agent.update_critic(batch)
 
-                    # Actor updates: num_actor_updates per gradient step
+                    # Actor updates: BC during warmup, RL after
                     actor_info = {}
-                    if on_policy_ppo:
+                    if in_bc_warmup:
+                        # BC warmup: distill base policy actions via MSE
+                        for _ in range(curr_num_actor_updates):
+                            actor_batch = next(replay_buffer_iterator)
+                            if shard_fn is not None:
+                                actor_batch = shard_fn(actor_batch)
+                            actor_info = agent.update_actor_bc(actor_batch)
+                    elif on_policy_ppo:
                         # On-policy PPO: sample from last trajectory with stored log_probs
-                        for _ in range(num_actor_updates):
+                        for _ in range(curr_num_actor_updates):
                             actor_batch = online_replay_buffer.sample_from_last_traj(variant.batch_size)
                             actor_batch = jax.device_put(actor_batch)
                             if shard_fn is not None:
@@ -251,7 +278,7 @@ def trajwise_alternating_training_loop_residual(
                             actor_info = agent.update_actor_onpolicy(actor_batch)
                     else:
                         # Off-policy: sample from full buffer (original GRPO/QPG path)
-                        for _ in range(num_actor_updates):
+                        for _ in range(curr_num_actor_updates):
                             actor_batch = _sample_actor_batch(
                                 replay_buffer, success_replay_buffer,
                                 variant.batch_size, success_buffer_ratio,
@@ -264,6 +291,13 @@ def trajwise_alternating_training_loop_residual(
                     update_info = {**critic_info, **actor_info}
                     update_info['residual/alpha'] = float(agent._residual_alpha)
                     update_info['algo'] = agent.algo
+                    update_info['bc_warmup/is_warmup'] = 1.0 if in_bc_warmup else 0.0
+                    
+                    # Log phase transition
+                    if bc_warmup_steps > 0 and i == bc_warmup_steps:
+                        print(f'\n{"="*60}')
+                        print(f'[BC Warmup -> RL] Transitioning at step {i}')
+                        print(f'{"="*60}\n')
 
                     pbar.update()
                     i += 1
@@ -399,6 +433,11 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
     
     # Flag to control initial exploration behavior
     use_zero_residual_initially = variant.get('use_zero_residual_initially', True)
+    
+    # BC warmup: force zero residual for ALL trajectories during warmup
+    bc_warmup_steps = variant.get('bc_warmup_steps', 0)
+    in_bc_warmup = (bc_warmup_steps > 0 and i < bc_warmup_steps)
+    force_zero_residual = (i == 0 and use_zero_residual_initially) or in_bc_warmup
 
     agent._rng, rng = jax.random.split(agent._rng)
     
@@ -440,8 +479,8 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
             
             # 3. Sample actions from SAC
             rng, key = jax.random.split(rng)
-            if i == 0 and use_zero_residual_initially:
-                # First trajectory: zero residual to evaluate base policy
+            if force_zero_residual:
+                # Zero residual: evaluate base policy (used for first traj or BC warmup)
                 delta_actions = np.zeros((query_frequency, variant.action_dim))
                 
                 # Compute actual log_prob of zero/base actions under current policy
@@ -459,7 +498,7 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
                 # Clamp for safety (very negative log_probs are fine, but avoid ±inf)
                 log_prob = float(np.clip(log_prob, -50.0, 50.0))
                 
-                print(f"[t={t}] Using zero residual for initial evaluation (log_prob={log_prob:.4f})")
+                print(f"[t={t}] Using zero residual {'(BC warmup)' if in_bc_warmup else '(initial eval)'} (log_prob={log_prob:.4f})")
                 # Compose executed action (base only)
                 actions = np.clip(base_actions[:query_frequency], -1.0, 1.0)
             else:

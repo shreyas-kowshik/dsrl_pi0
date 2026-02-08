@@ -83,6 +83,11 @@ if __name__ == '__main__':
     # Policy std bounds (NaN stability)
     parser.add_argument('--log_std_min', default=-5.0, help='Min log_std for policy (NaN stability)', type=float)
     parser.add_argument('--log_std_max', default=2.0, help='Max log_std for policy', type=float)
+    
+    # BC warmup parameters
+    parser.add_argument('--bc_warmup_steps', default=0, help='Number of gradient steps for BC warmup (0=disabled)', type=int)
+    parser.add_argument('--bc_warmup_num_critic_updates', default=10, help='Critic updates per grad step during BC warmup (aggressive)', type=int)
+    parser.add_argument('--bc_warmup_num_actor_updates', default=1, help='Actor BC updates per grad step during BC warmup (light)', type=int)
 
     # Default training kwargs
     train_args_dict = dict(
@@ -165,6 +170,10 @@ if __name__ == '__main__':
     print(f"  normalize_advantages: {variant.get('normalize_advantages', False)}")
     print(f"  log_std_min: {variant.get('log_std_min', -5.0)}")
     print(f"  log_std_max: {variant.get('log_std_max', 2.0)}")
+    print("  --- BC Warmup ---")
+    print(f"  bc_warmup_steps: {variant.get('bc_warmup_steps', 0)}")
+    print(f"  bc_warmup_num_critic_updates: {variant.get('bc_warmup_num_critic_updates', 10)}")
+    print(f"  bc_warmup_num_actor_updates: {variant.get('bc_warmup_num_actor_updates', 1)}")
     print("=" * 60)
     print(variant)
     

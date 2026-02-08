@@ -852,3 +852,137 @@ def update_actor_residual_ppo_onpolicy(
         new_actor = actor.apply_gradients(grads=grads)
     
     return new_actor, info
+
+
+def update_actor_bc_residual(
+        key: PRNGKey,
+        actor: TrainState,
+        batch: DatasetDict,
+        query_frequency: int,
+        predict_a_exec: bool = False,
+) -> Tuple[TrainState, Dict[str, float]]:
+    """BC warmup actor update: distill base policy actions into residual policy.
+    
+    During BC warmup, the actor is trained to reproduce the base policy's
+    behavior via supervised learning (MSE on policy mode):
+    
+    - If predict_a_exec=False (delta mode): target = zeros
+      (actor should predict zero residual so a_exec = a_base)
+    - If predict_a_exec=True (a_exec mode): target = a_base
+      (actor should predict the base policy action directly)
+    
+    This gives the actor a warm initialization near the identity mapping
+    before RL training begins, ensuring a smooth transition.
+    
+    Args:
+        key: PRNG key.
+        actor: Actor TrainState.
+        batch: Batch of transitions containing:
+            - observations['base_action']: (B, chunk_len, action_dim, 1) base actions
+        query_frequency: Chunk length for action queries.
+        predict_a_exec: If True, BC target is a_base; if False, BC target is zeros.
+        
+    Returns:
+        Updated actor TrainState and info dict with BC diagnostics.
+    """
+    # Extract base actions from observations
+    base_action_raw = batch['observations']['base_action']
+    base_action = jnp.squeeze(base_action_raw, axis=-1)  # (B, T, A)
+    B, T, A = base_action.shape
+    
+    # Construct BC target
+    if predict_a_exec:
+        # Actor should predict a_base directly
+        bc_target = base_action[:, :query_frequency, :].reshape(B, query_frequency * A)
+    else:
+        # Actor should predict zero residual (delta = 0)
+        bc_target = jnp.zeros((B, query_frequency * A))
+    
+    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, Tuple[Dict[str, float], Dict]]:
+        # Forward pass through actor
+        if hasattr(actor, 'batch_stats') and actor.batch_stats is not None:
+            dist, new_model_state = actor.apply_fn(
+                {'params': actor_params, 'batch_stats': actor.batch_stats},
+                batch['observations'],
+                mutable=['batch_stats']
+            )
+            if isinstance(dist, tuple):
+                dist = dist[0]
+        else:
+            dist = actor.apply_fn({'params': actor_params}, batch['observations'])
+            new_model_state = {}
+        
+        # Policy mode (deterministic action): avoids log_prob / atanh issues
+        policy_mode = dist.mode()  # (B, action_dim_flat)
+        
+        # MSE loss between policy mode and BC target
+        mse_per_sample = jnp.mean((policy_mode - bc_target) ** 2, axis=-1)  # (B,)
+        bc_loss = jnp.mean(mse_per_sample)
+        
+        # Distribution diagnostics
+        mean_dist = dist.distribution._loc
+        std_diag_dist = dist.distribution._scale_diag
+        log_std_dist = jnp.log(std_diag_dist + 1e-8)
+        
+        # Entropy from base distribution
+        base_entropy = dist.distribution.entropy()  # (B,)
+        mean_entropy = base_entropy.mean()
+        
+        # Compute a_exec from policy mode for diagnostics
+        policy_mode_chunked = policy_mode.reshape(B, query_frequency, A)
+        if predict_a_exec:
+            a_exec = jnp.clip(policy_mode_chunked, -1.0, 1.0)
+            delta_from_base = a_exec - base_action[:, :query_frequency, :]
+        else:
+            a_exec = jnp.clip(
+                base_action[:, :query_frequency, :] + policy_mode_chunked, -1.0, 1.0
+            )
+            delta_from_base = policy_mode_chunked
+        
+        delta_norm = jnp.linalg.norm(delta_from_base.reshape(B, -1), axis=-1)
+        base_flat = base_action[:, :query_frequency, :].reshape(B, -1)
+        base_norm = jnp.linalg.norm(base_flat, axis=-1)
+        clipping_rate = (jnp.abs(a_exec) >= 1.0).mean()
+        
+        info = {
+            'actor_loss': bc_loss,
+            'bc_warmup/mse_loss': bc_loss,
+            'bc_warmup/mse_per_sample_mean': mse_per_sample.mean(),
+            'bc_warmup/mse_per_sample_max': mse_per_sample.max(),
+            'bc_warmup/mse_per_sample_min': mse_per_sample.min(),
+            'bc_warmup/policy_mode_mean': policy_mode.mean(),
+            'bc_warmup/policy_mode_std': jnp.std(policy_mode),
+            'bc_warmup/target_mean': bc_target.mean(),
+            'bc_warmup/target_std': jnp.std(bc_target),
+            'bc_warmup/delta_norm_mean': delta_norm.mean(),
+            'bc_warmup/base_norm_mean': base_norm.mean(),
+            'bc_warmup/clipping_rate': clipping_rate,
+            'bc_warmup/is_warmup': 1.0,
+            # Standard actor diagnostics (for continuity in wandb)
+            'entropy': mean_entropy,
+            'mean_pi_norm': jnp.linalg.norm(mean_dist, axis=-1).mean(),
+            'std_pi_norm': jnp.linalg.norm(std_diag_dist, axis=-1).mean(),
+            'mean_pi_avg': mean_dist.mean(),
+            'std_pi_avg': std_diag_dist.mean(),
+            'std_pi_min': std_diag_dist.min(),
+            'std_pi_max': std_diag_dist.max(),
+            'log_std_mean': log_std_dist.mean(),
+            'log_std_min': log_std_dist.min(),
+            'log_std_max': log_std_dist.max(),
+            'actor/delta_norm_mean': delta_norm.mean(),
+            'actor/clipping_rate': clipping_rate,
+        }
+        
+        return bc_loss, (info, new_model_state)
+    
+    grads, (info, new_model_state) = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
+    
+    # NaN guard
+    grads = _nan_to_num_tree(grads)
+    
+    if 'batch_stats' in new_model_state and new_model_state.get('batch_stats'):
+        new_actor = actor.apply_gradients(grads=grads, batch_stats=new_model_state['batch_stats'])
+    else:
+        new_actor = actor.apply_gradients(grads=grads)
+    
+    return new_actor, info

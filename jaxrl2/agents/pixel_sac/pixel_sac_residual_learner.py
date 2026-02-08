@@ -35,7 +35,7 @@ from jaxrl2.networks.encoders.networks import Encoder, PixelMultiplexer
 from jaxrl2.networks.encoders.impala_encoder import ImpalaEncoder, SmallerImpalaEncoder
 from jaxrl2.networks.encoders.resnet_encoderv1 import ResNet18, ResNet34, ResNetSmall
 from jaxrl2.networks.encoders.resnet_encoderv2 import ResNetV2Encoder
-from jaxrl2.agents.pixel_sac.residual_actor_updater import update_actor_residual
+from jaxrl2.agents.pixel_sac.residual_actor_updater import update_actor_residual, update_actor_bc_residual
 from jaxrl2.agents.pixel_sac.residual_critic_updater import update_critic_residual
 from jaxrl2.agents.pixel_sac.temperature_updater import update_temperature
 from jaxrl2.agents.pixel_sac.temperature import Temperature
@@ -200,6 +200,50 @@ def _update_actor_jit(
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
 
     return rng, new_actor, new_temp, {**actor_info, **alpha_info}
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        'color_jitter', 'num_cameras', 'query_frequency', 'predict_a_exec',
+    ),
+)
+def _update_actor_bc_jit(
+    rng: PRNGKey,
+    actor: TrainState,
+    batch: DatasetDict,
+    color_jitter: bool,
+    num_cameras: int,
+    query_frequency: int,
+    predict_a_exec: bool = False,
+) -> Tuple[PRNGKey, TrainState, Dict[str, float]]:
+    """JIT-compiled BC warmup actor update for SAC."""
+    aug_pixels = batch['observations']['pixels']
+
+    if batch['observations']['pixels'].squeeze().ndim != 2:
+        rng, key = jax.random.split(rng)
+        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
+
+        if color_jitter:
+            rng, key = jax.random.split(rng)
+            if num_cameras > 1:
+                for i in range(num_cameras):
+                    aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
+                        (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                    )
+            else:
+                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+
+    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
+    batch = batch.copy(add_or_replace={'observations': observations})
+
+    key, rng = jax.random.split(rng)
+    new_actor, actor_info = update_actor_bc_residual(
+        key, actor, batch, query_frequency,
+        predict_a_exec=predict_a_exec,
+    )
+
+    return rng, new_actor, actor_info
 
 
 class PixelSACResidualLearner(Agent):
@@ -521,6 +565,31 @@ class PixelSACResidualLearner(Agent):
         self._rng = new_rng
         self._actor = new_actor
         self._temp = new_temp
+        return actor_info
+
+    def update_actor_bc(self, batch: FrozenDict) -> Dict[str, float]:
+        """Perform a single BC warmup actor update.
+        
+        Distills base policy actions into the residual policy via MSE.
+        Used during BC warmup phase before RL training begins.
+        
+        Args:
+            batch: Batch of transitions with observations containing 'base_action'.
+            
+        Returns:
+            Dictionary of BC actor training metrics.
+        """
+        new_rng, new_actor, actor_info = _update_actor_bc_jit(
+            self._rng,
+            self._actor,
+            batch,
+            self.color_jitter,
+            self.num_cameras,
+            self.query_frequency,
+            self.predict_a_exec,
+        )
+        self._rng = new_rng
+        self._actor = new_actor
         return actor_info
 
     def update(self, batch: FrozenDict) -> Dict[str, float]:
