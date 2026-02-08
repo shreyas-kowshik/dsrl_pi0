@@ -892,8 +892,15 @@ def update_actor_bc_residual(
     
     # Construct BC target
     if predict_a_exec:
-        # Actor should predict a_base directly
-        bc_target = base_action[:, :query_frequency, :].reshape(B, query_frequency * A)
+        # Actor should predict a_base directly.
+        # IMPORTANT: clip to [-1, 1] because Pi-0.5 outputs can exceed this range
+        # (quantile unnormalization is unbounded), but the actor's output is
+        # tanh-squashed and bounded in (-1, 1). Without clipping, the MSE target
+        # would be unreachable, pushing actor mean toward ±∞ and causing NaN.
+        # This matches the RL update which also clips: a_exec = clip(actor_output, -1, 1).
+        bc_target = jnp.clip(
+            base_action[:, :query_frequency, :], -1.0, 1.0
+        ).reshape(B, query_frequency * A)
     else:
         # Actor should predict zero residual (delta = 0)
         bc_target = jnp.zeros((B, query_frequency * A))
@@ -942,7 +949,9 @@ def update_actor_bc_residual(
         delta_norm = jnp.linalg.norm(delta_from_base.reshape(B, -1), axis=-1)
         base_flat = base_action[:, :query_frequency, :].reshape(B, -1)
         base_norm = jnp.linalg.norm(base_flat, axis=-1)
+        a_exec_norm = jnp.linalg.norm(a_exec.reshape(B, -1), axis=-1)
         clipping_rate = (jnp.abs(a_exec) >= 1.0).mean()
+        bc_target_norm = jnp.linalg.norm(bc_target, axis=-1)
         
         info = {
             'actor_loss': bc_loss,
@@ -971,6 +980,9 @@ def update_actor_bc_residual(
             'log_std_max': log_std_dist.max(),
             'actor/delta_norm_mean': delta_norm.mean(),
             'actor/clipping_rate': clipping_rate,
+            'actor/predict_a_exec': predict_a_exec, 
+            'actor/a_exec_norm_mean': a_exec_norm.mean(), 
+            'actor/bc_target_norm_mean': bc_target_norm.mean()
         }
         
         return bc_loss, (info, new_model_state)

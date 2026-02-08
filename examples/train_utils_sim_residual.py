@@ -483,22 +483,29 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
                 # Zero residual: evaluate base policy (used for first traj or BC warmup)
                 delta_actions = np.zeros((query_frequency, variant.action_dim))
                 
-                # Compute actual log_prob of zero/base actions under current policy
-                # so on-policy PPO importance weights are correct
-                if predict_a_exec:
-                    # When predicting a_exec, the "action" stored is base_action itself
-                    eval_actions_flat = np.clip(base_actions[:query_frequency], -1.0, 1.0).reshape(1, -1)
+                if in_bc_warmup:
+                    # During BC warmup: skip log_prob computation entirely.
+                    # old_log_probs are only used by on-policy PPO importance weights,
+                    # and we're doing BC during warmup, so they're never consumed.
+                    # Computing log_prob here is wasteful and risks NaN from the
+                    # TanhNormal Jacobian in high-dimensional action spaces.
+                    log_prob = 0.0
+                    if t == 0:
+                        print(f"[BC warmup] Forcing zero residual (skipping log_prob)")
                 else:
-                    # When predicting delta, the stored action is zeros
-                    eval_actions_flat = delta_actions.reshape(1, -1)
-                dist = agent._actor.apply_fn(
-                    {'params': agent._actor.params}, obs_dict
-                )
-                log_prob = float(dist.log_prob(jnp.array(eval_actions_flat)).squeeze())
-                # Clamp for safety (very negative log_probs are fine, but avoid ±inf)
-                log_prob = float(np.clip(log_prob, -50.0, 50.0))
+                    # First trajectory (initial eval): compute log_prob for PPO correctness
+                    if predict_a_exec:
+                        eval_actions_flat = np.clip(base_actions[:query_frequency], -1.0, 1.0).reshape(1, -1)
+                    else:
+                        eval_actions_flat = delta_actions.reshape(1, -1)
+                    dist = agent._actor.apply_fn(
+                        {'params': agent._actor.params}, obs_dict
+                    )
+                    log_prob = float(dist.log_prob(jnp.array(eval_actions_flat)).squeeze())
+                    log_prob = float(np.clip(log_prob, -50.0, 50.0))
+                    if t == 0:
+                        print(f"[t={t}] Using zero residual (initial eval) (log_prob={log_prob:.4f})")
                 
-                print(f"[t={t}] Using zero residual {'(BC warmup)' if in_bc_warmup else '(initial eval)'} (log_prob={log_prob:.4f})")
                 # Compose executed action (base only)
                 actions = np.clip(base_actions[:query_frequency], -1.0, 1.0)
             else:
