@@ -45,6 +45,8 @@ def obs_to_img(obs, variant):
         curr_image = obs["agentview_image"][::-1, ::-1]
     elif variant.env == 'aloha_cube':
         curr_image = obs["pixels"]["top"]
+    elif variant.env == 'cartpole':
+        curr_image = obs["image"]
     else:
         raise NotImplementedError(f"Unknown env: {variant.env}")
     if variant.resize_image > 0: 
@@ -85,6 +87,13 @@ def obs_to_pi_zero_input(obs, variant):
             "state": obs["agent_pos"],
             "images": {"cam_high": np.transpose(img, (2, 0, 1))}
         }
+    elif variant.env == 'cartpole':
+        # CartPole uses ZeroBasePolicy, so this is never actually called
+        # for inference, but we define it for consistency
+        obs_pi_zero = {
+            "state": obs["state"],
+            "image": obs["image"],
+        }
     else:
         raise NotImplementedError(f"Unknown env: {variant.env}")
     return obs_pi_zero
@@ -102,6 +111,8 @@ def obs_to_qpos(obs, variant):
         )
     elif variant.env == 'aloha_cube':
         qpos = obs["agent_pos"]
+    elif variant.env == 'cartpole':
+        qpos = obs["state"]
     else:
         raise NotImplementedError(f"Unknown env: {variant.env}")
     return qpos
@@ -445,6 +456,8 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
         obs = env.reset()
     elif 'aloha' in variant.env:
         obs, _ = env.reset()
+    elif variant.env == 'cartpole':
+        obs = env.reset()
     
     image_list = []  # for visualization
     rewards = []
@@ -565,6 +578,8 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
         elif 'aloha' in variant.env:
             obs, reward, terminated, truncated, _ = env.step(action_t)
             done = terminated or truncated
+        elif variant.env == 'cartpole':
+            obs, reward, done, info = env.step(action_t)
             
         rewards.append(reward)
         image_list.append(curr_image)
@@ -590,18 +605,30 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
     # Per episode stats
     rewards = np.array(rewards)
     episode_return = np.sum(rewards[rewards != None])
-    is_success = (reward == env_max_reward)
+    if variant.env == 'cartpole':
+        # CartPole: success if most recent info shows success (pole was upright)
+        is_success = bool(info.get('success', 0))
+    else:
+        is_success = (reward == env_max_reward)
     print(f'Rollout Done: {episode_return=}, Success: {is_success}')
     
-    # Sparse -1/0 reward for SAC training
-    if is_success:
-        query_steps = len(action_list)
-        rewards = np.concatenate([-np.ones(query_steps - 1), [0]])
-        masks = np.concatenate([np.ones(query_steps - 1), [0]])
+    reward_type = variant.get('reward_type', 'sparse')
+    query_steps = len(action_list)
+    if reward_type == 'dense':
+        # Keep raw environment rewards; set terminal mask on done
+        rewards = np.array(rewards, dtype=np.float32)
+        if is_success:
+            masks = np.concatenate([np.ones(query_steps - 1), [0]])
+        else:
+            masks = np.ones(query_steps)
     else:
-        query_steps = len(action_list)
-        rewards = -np.ones(query_steps)
-        masks = np.ones(query_steps)
+        # Sparse -1/0 reward for SAC training
+        if is_success:
+            rewards = np.concatenate([-np.ones(query_steps - 1), [0]])
+            masks = np.concatenate([np.ones(query_steps - 1), [0]])
+        else:
+            rewards = -np.ones(query_steps)
+            masks = np.ones(query_steps)
 
     return {
         'observations': obs_list,
@@ -647,6 +674,8 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
             obs = env.reset()
         elif 'aloha' in variant.env:
             obs, _ = env.reset()
+        elif variant.env == 'cartpole':
+            obs = env.reset()
             
         image_list = []
         rewards = []
@@ -718,6 +747,8 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
             elif 'aloha' in variant.env:
                 obs, reward, terminated, truncated, _ = env.step(action_t)
                 done = terminated or truncated
+            elif variant.env == 'cartpole':
+                obs, reward, done, eval_info = env.step(action_t)
                 
             rewards.append(reward)
             image_list.append(curr_image)
@@ -731,7 +762,10 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
         episode_returns.append(episode_return)
         episode_highest_reward = np.max(rewards)
         highest_rewards.append(episode_highest_reward)
-        is_success = (reward == env_max_reward)
+        if variant.env == 'cartpole':
+            is_success = bool(eval_info.get('success', 0))
+        else:
+            is_success = (reward == env_max_reward)
         success_rates.append(is_success)
                 
         print(f'Rollout {rollout_id}: {episode_return=}, Success: {is_success}')

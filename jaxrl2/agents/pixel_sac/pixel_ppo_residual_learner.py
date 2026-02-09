@@ -13,7 +13,7 @@ Algorithms:
 - 'q_weighted_pg': Uses raw Q as advantage (no baseline)
 - 'residual_grpo': Uses Q - mean(Q) as advantage (GRPO baseline)
 """
-
+#TODO: PPO doesnt work. There is a bug somewhere causing the actor to diverge. Need to investigate and fix. Test env -- cartpole
 import matplotlib
 matplotlib.use('Agg')
 from flax.training import checkpoints

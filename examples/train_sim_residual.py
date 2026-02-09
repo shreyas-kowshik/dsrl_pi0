@@ -7,6 +7,7 @@ This script sets up the Residual RL training pipeline where:
 - Executed actions are: a_exec = clip(base_action + alpha * delta, -1, 1)
 
 Supported algorithms:
+- 'sac': Standard SAC (no residual, no base policy)
 - 'residual_sac': SAC-style (maximize Q - alpha * log_prob)
 - 'q_weighted_pg': Q-weighted Policy Gradient with PPO clipping (raw Q as advantage)
 - 'residual_grpo': GRPO with PPO clipping (Q - mean(Q) as advantage)
@@ -22,18 +23,18 @@ import pathlib
 import copy
 
 import jax
+import jax.numpy as jnp
+from jaxrl2.agents.pixel_sac.pixel_sac_learner import PixelSACLearner
 from jaxrl2.agents.pixel_sac.pixel_sac_residual_learner import PixelSACResidualLearner
 from jaxrl2.agents.pixel_sac.pixel_ppo_residual_learner import PixelPPOResidualLearner
 from jaxrl2.utils.general_utils import add_batch_dim
 import numpy as np
 
-import gymnasium as gym
-import gym_aloha
+import gym
 from gym.spaces import Dict, Box
 
-from libero.libero import benchmark
-from libero.libero import get_libero_path
-from libero.libero.envs import OffScreenRenderEnv
+# Heavy env/model imports are deferred to avoid requiring all deps for simple test envs
+# libero, gym_aloha, openpi are imported conditionally inside main_residual()
 
 from jaxrl2.data import ReplayBuffer
 from jaxrl2.utils.wandb_logger import WandBLogger, create_exp_name
@@ -43,16 +44,14 @@ from examples.train_utils_sim_residual import trajwise_alternating_training_loop
 import tensorflow as tf
 from jax.experimental.compilation_cache import compilation_cache
 
-from openpi.training import config as openpi_config
-from openpi.policies import policy_config
-from openpi.shared import download
-
 home_dir = os.environ['HOME']
 compilation_cache.initialize_cache(os.path.join(home_dir, 'jax_compilation_cache'))
 
 
 def _get_libero_env(task, resolution, seed):
     """Initializes and returns the LIBERO environment, along with the task description."""
+    from libero.libero import get_libero_path
+    from libero.libero.envs import OffScreenRenderEnv
     task_description = task.language
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
     env_args = {"bddl_file_name": task_bddl_file, "camera_heights": resolution, "camera_widths": resolution}
@@ -94,6 +93,9 @@ class DummyEnvResidual(gym.ObservationWrapper):
         elif variant.env == 'aloha_cube':
             state_dim = 14
             action_dim = 14
+        elif variant.env == 'cartpole':
+            state_dim = 4
+            action_dim = 1
         else:
             raise NotImplementedError(f"Unknown env: {variant.env}")
         
@@ -163,6 +165,9 @@ def main_residual(variant):
     
     # Environment setup
     if variant.env == 'libero':
+        from libero.libero import benchmark
+        from libero.libero import get_libero_path
+        from libero.libero.envs import OffScreenRenderEnv
         benchmark_dict = benchmark.get_benchmark_dict()
         task_suite = benchmark_dict["libero_10"]()
         task_id = 8  # KITCHEN_SCENE8_put_both_moka_pots_on_the_stove_demo.hdf5
@@ -174,6 +179,7 @@ def main_residual(variant):
         variant.max_timesteps = 500
         print("Libero environment initialized with task description:", task_description)
     elif variant.env == 'aloha_cube':
+        import gymnasium
         from gymnasium.envs.registration import register
         register(
             id="gym_aloha/AlohaTransferCube-v0",
@@ -182,10 +188,21 @@ def main_residual(variant):
             nondeterministic=True,
             kwargs={"obs_type": "pixels", "task": "transfer_cube"},
         )
-        env = gym.make("gym_aloha/AlohaTransferCube-v0", obs_type="pixels_agent_pos", render_mode="rgb_array")
+        env = gymnasium.make("gym_aloha/AlohaTransferCube-v0", obs_type="pixels_agent_pos", render_mode="rgb_array")
         eval_env = copy.deepcopy(env)
         variant.env_max_reward = 4
         variant.max_timesteps = 500
+    elif variant.env == 'cartpole':
+        from envs.cartpole_env import CartPoleEnv
+        render_size = variant.resize_image if variant.resize_image > 0 else 100
+        env = CartPoleEnv(render_size=render_size, horizon=variant.get('cartpole_horizon', 100))
+        env.seed(variant.seed)
+        eval_env = CartPoleEnv(render_size=render_size, horizon=variant.get('cartpole_horizon', 100))
+        eval_env.seed(variant.seed + 100)
+        variant.env_max_reward = 0  # best reward is 0 (theta=0)
+        variant.max_timesteps = variant.get('cartpole_horizon', 100)
+        variant.task_description = 'Balance the pole upright'
+        print("CartPole test environment initialized.")
     else:
         raise NotImplementedError(f"Unknown env: {variant.env}")
 
@@ -205,18 +222,29 @@ def main_residual(variant):
     print('Residual SAC sample obs shapes:', [(k, v.shape) for k, v in sample_obs.items()])
     print('Residual SAC sample action shape:', sample_action.shape)
     
-    # Load frozen base policy (Pi-0.5)
-    if variant.env == 'libero':
-        config = openpi_config.get_config(variant.pi_05_config)
-        checkpoint_dir = download.maybe_download(variant.pi_05_ckpt_dir)
-    elif variant.env == 'aloha_cube':
-        config = openpi_config.get_config("pi0_aloha_sim")
-        checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_aloha_sim")
+    # Load frozen base policy (Pi-0.5 or zero policy for test envs)
+    if variant.env == 'cartpole':
+        from envs.zero_base_policy import ZeroBasePolicy
+        agent_dp = ZeroBasePolicy(
+            action_dim=variant.action_dim,
+            chunk_len=variant.chunk_len,
+        )
+        print(f"Using ZeroBasePolicy for CartPole (action_dim={variant.action_dim}, chunk_len={variant.chunk_len})")
     else:
-        raise NotImplementedError()
-    
-    agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
-    print(f"Loaded frozen Pi-0.5 policy from {checkpoint_dir}")
+        from openpi.training import config as openpi_config
+        from openpi.policies import policy_config
+        from openpi.shared import download
+        if variant.env == 'libero':
+            config = openpi_config.get_config(variant.pi_05_config)
+            checkpoint_dir = download.maybe_download(variant.pi_05_ckpt_dir)
+        elif variant.env == 'aloha_cube':
+            config = openpi_config.get_config("pi0_aloha_sim")
+            checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_aloha_sim")
+        else:
+            raise NotImplementedError()
+        
+        agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
+        print(f"Loaded frozen Pi-0.5 policy from {checkpoint_dir}")
     
     # Add residual_alpha to kwargs for the learner
     kwargs['residual_alpha'] = variant.residual_alpha
@@ -225,7 +253,36 @@ def main_residual(variant):
     algo = variant.get('algo', 'residual_sac')
     
     # Create Residual RL agent based on algorithm
-    if algo == 'residual_sac':
+    if algo == 'sac':
+        # Plain SAC (no residual)
+        # Whitelist only the params PixelSACLearner accepts
+        sac_accepted = {
+            'actor_lr', 'critic_lr', 'temp_lr', 'decay_steps',
+            'hidden_dims', 'cnn_features', 'cnn_strides', 'cnn_padding',
+            'latent_dim', 'discount', 'tau', 'critic_reduction', 'dropout_rate',
+            'encoder_type', 'encoder_norm', 'color_jitter',
+            'use_spatial_softmax', 'softmax_temperature', 'aug_next',
+            'use_bottleneck', 'init_temperature', 'num_qs', 'target_entropy',
+            'action_magnitude', 'num_cameras', 'learn_std', 'fixed_log_std',
+        }
+        sac_kwargs = {k: v for k, v in kwargs.items() if k in sac_accepted}
+        sac_agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **sac_kwargs)
+        # Wrap with interface expected by the training loop
+        sac_agent._residual_alpha = jnp.asarray(0.0, dtype=jnp.float32)
+        sac_agent.algo = 'sac'
+        sac_agent.predict_a_exec = True  # actor output IS the action (no residual composition)
+        sac_agent.query_frequency = variant.query_freq
+        sac_agent._num_critic_updates = variant.get('num_critic_updates', 1)
+        sac_agent._num_actor_updates = variant.get('num_actor_updates', 1)
+        # Provide update_critic / update_actor / update_actor_bc expected by the training loop.
+        # PixelSACLearner.update() does critic+actor+temp in one fused jit call,
+        # so we run the full update in update_critic and make update_actor a no-op.
+        sac_agent.update_critic = sac_agent.update
+        sac_agent.update_actor = lambda batch: {}  # already done in update_critic
+        sac_agent.update_actor_bc = lambda batch: {}  # no BC for plain SAC
+        agent = sac_agent
+        print(f"Initialized plain SAC (no residual)")
+    elif algo == 'residual_sac':
         # SAC learner
         kwargs['use_huber_loss'] = variant.get('use_huber_loss', False)
         kwargs['huber_delta'] = variant.get('huber_delta', 1.0)

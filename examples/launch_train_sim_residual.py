@@ -3,7 +3,7 @@
 This script provides CLI argument parsing for Residual SAC/PPO/GRPO training.
 Key additions:
 - --residual_alpha for controlling the residual scaling factor.
-- --algo for selecting algorithm: 'residual_sac', 'residual_ppo', 'residual_grpo'
+- --algo for selecting algorithm: 'sac', 'residual_sac', 'q_weighted_pg', 'residual_grpo'
 """
 
 import argparse
@@ -19,7 +19,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default=42, help='Random seed.', type=int)
     parser.add_argument('--launch_group_id', default='', help='Group id used to group runs on wandb.')
     parser.add_argument('--eval_episodes', default=10, help='Number of episodes used for evaluation.', type=int)
-    parser.add_argument('--env', default='libero', help='Name of environment (libero, aloha_cube)')
+    parser.add_argument('--env', default='libero', help='Name of environment (libero, aloha_cube, cartpole)')
     parser.add_argument('--log_interval', default=1000, help='Logging interval.', type=int)
     parser.add_argument('--eval_interval', default=5000, help='Eval interval.', type=int)
     parser.add_argument('--checkpoint_interval', default=-1, help='Checkpoint interval.', type=int)
@@ -37,6 +37,12 @@ if __name__ == '__main__':
     parser.add_argument('--pi_05_config', default='', help='Config name for Pi-0.5 model', type=str)
     parser.add_argument('--pi_05_ckpt_dir', default='', help='Checkpoint dir for Pi-0.5 model', type=str)
     
+    # CartPole-specific parameters
+    parser.add_argument('--cartpole_horizon', default=100, help='Episode horizon for CartPole env', type=int)
+    
+    # Reward shaping
+    parser.add_argument('--reward_type', default='sparse', help='Reward type: sparse (-1/0 binary) or dense (raw env reward)', type=str, choices=['sparse', 'dense'])
+    
     # Residual-specific parameters
     parser.add_argument('--residual_alpha', default=0.1, help='Scaling factor for residual actions', type=float)
     parser.add_argument('--chunk_len', default=10, help='Action chunk length (Pi-0.5 horizon)', type=int)
@@ -44,8 +50,8 @@ if __name__ == '__main__':
     parser.add_argument('--predict_a_exec', default=0, help='Actor predicts a_exec directly instead of delta (1=yes, 0=no)', type=int)
     parser.add_argument('--learn_std', default=1, help='Whether the policy learns a state-dependent std (1=yes, 0=no)', type=int)
     
-    # Algorithm selection: 'residual_sac', 'q_weighted_pg', 'residual_grpo'
-    parser.add_argument('--algo', default='residual_sac', help='Algorithm: residual_sac, q_weighted_pg, residual_grpo', type=str)
+    # Algorithm selection: 'sac', 'residual_sac', 'q_weighted_pg', 'residual_grpo'
+    parser.add_argument('--algo', default='residual_sac', help='Algorithm: sac, residual_sac, q_weighted_pg, residual_grpo', type=str)
     
     # PPO/GRPO specific parameters (adv_clip_min/max for clipping advantages)
     parser.add_argument('--actor_tau', default=0.005, help='[DEPRECATED] Target actor soft update rate (not used anymore)', type=float)
@@ -140,6 +146,7 @@ if __name__ == '__main__':
     print(f"RESIDUAL RL CONFIGURATION ({algo.upper()})")
     print("=" * 60)
     print(f"  algo: {algo}")
+    print(f"  reward_type: {variant.get('reward_type', 'sparse')}")
     print(f"  residual_alpha: {variant.get('residual_alpha', 0.1)}")
     print(f"  chunk_len: {variant.get('chunk_len', 10)}")
     print(f"  use_zero_residual_initially: {variant.get('use_zero_residual_initially', True)}")
