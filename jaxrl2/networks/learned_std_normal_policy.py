@@ -93,3 +93,43 @@ class LearnedStdTanhNormalPolicy(nn.Module):
 
         distribution = TanhMultivariateNormalDiag(loc=means, scale_diag=jnp.exp(log_stds), low=self.low, high=self.high)
         return distribution
+
+
+class FixedStdTanhNormalPolicy(nn.Module):
+    """TanhNormal policy with a learned mean and fixed (non-learnable) std.
+
+    The log_std is a constant scalar broadcast across all action dimensions.
+    This prevents std collapse during RL training after BC warmup, which is
+    a common failure mode when std is learned and BC/RL exert opposing pressure.
+
+    Drop-in replacement for LearnedStdTanhNormalPolicy — same constructor
+    args (log_std_min/max are unused but kept for compatibility).
+    """
+    hidden_dims: Sequence[int]
+    action_dim: int
+    dropout_rate: Optional[float] = None
+    fixed_log_std: float = -0.5
+    log_std_min: Optional[float] = None   # unused, kept for compat
+    log_std_max: Optional[float] = None   # unused, kept for compat
+    low: Optional[float] = None
+    high: Optional[float] = None
+
+    @nn.compact
+    def __call__(self,
+                 observations: jnp.ndarray,
+                 training: bool = False) -> distrax.Distribution:
+        outputs = MLP(self.hidden_dims,
+                      activate_final=True,
+                      dropout_rate=self.dropout_rate)(observations,
+                                                      training=training)
+
+        means = nn.Dense(self.action_dim, kernel_init=default_init(1e-2))(outputs)
+
+        # Fixed std: constant scalar, no gradients
+        log_stds = jnp.full_like(means, self.fixed_log_std)
+
+        distribution = TanhMultivariateNormalDiag(
+            loc=means, scale_diag=jnp.exp(log_stds),
+            low=self.low, high=self.high,
+        )
+        return distribution

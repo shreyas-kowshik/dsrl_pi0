@@ -40,7 +40,7 @@ from jaxrl2.agents.pixel_sac.residual_critic_updater import update_critic_residu
 from jaxrl2.agents.pixel_sac.temperature_updater import update_temperature
 from jaxrl2.agents.pixel_sac.temperature import Temperature
 from jaxrl2.data.dataset import DatasetDict
-from jaxrl2.networks.learned_std_normal_policy import LearnedStdTanhNormalPolicy
+from jaxrl2.networks.learned_std_normal_policy import LearnedStdTanhNormalPolicy, FixedStdTanhNormalPolicy
 from jaxrl2.networks.values import StateActionEnsemble
 from jaxrl2.types import Params, PRNGKey
 from jaxrl2.utils.target_update import soft_target_update
@@ -298,6 +298,8 @@ class PixelSACResidualLearner(Agent):
                  predict_a_exec: bool = False,
                  log_std_min: float = -5.0,
                  log_std_max: float = 2.0,
+                 learn_std: bool = True,
+                 fixed_log_std: float = -0.5,
                  ):
         """Initialize Residual SAC Learner.
         
@@ -399,14 +401,23 @@ class PixelSACResidualLearner(Agent):
             hidden_dims = (hidden_dims[0], hidden_dims[0], hidden_dims[0])
         
         # Actor: outputs residual actions (delta) in [-action_magnitude, action_magnitude]
-        policy_def = LearnedStdTanhNormalPolicy(
-            hidden_dims, self.action_dim, 
-            dropout_rate=dropout_rate, 
-            log_std_min=log_std_min,
-            log_std_max=log_std_max,
-            low=-action_magnitude, 
-            high=action_magnitude
-        )
+        if learn_std:
+            policy_def = LearnedStdTanhNormalPolicy(
+                hidden_dims, self.action_dim, 
+                dropout_rate=dropout_rate, 
+                log_std_min=log_std_min,
+                log_std_max=log_std_max,
+                low=-action_magnitude, 
+                high=action_magnitude
+            )
+        else:
+            policy_def = FixedStdTanhNormalPolicy(
+                hidden_dims, self.action_dim,
+                dropout_rate=dropout_rate,
+                fixed_log_std=fixed_log_std,
+                low=-action_magnitude,
+                high=action_magnitude,
+            )
 
         actor_def = PixelMultiplexer(
             encoder=encoder_def,

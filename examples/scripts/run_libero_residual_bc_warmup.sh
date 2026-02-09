@@ -20,7 +20,7 @@ mkdir -p /data/user_data/sreyasv/r-sac/logs/
 # -------------------------------
 # Configuration
 # -------------------------------
-proj_name=debug-libero-residual-sac-f-a
+proj_name=debug-3-libero-residual-sac-f-a
 device_id=0
 
 export DISPLAY=:0
@@ -43,13 +43,13 @@ pip install mujoco==3.3.1
 python -m examples.launch_train_sim_residual \
     --algorithm residual_sac \
     --env libero \
-    --prefix r-sac-a-exec_pi5_2moka-pots-ckpt-crct-bc-wrrm-up-v3-sampled-actions-crtc-pop-base-act-ent-35 \
+    --prefix r-sac-a-exec_pi5_2moka-pots-ckpt-crct-v3-utd-5-1-only-q \
     --wandb_project ${proj_name} \
     --batch_size 256 \
     --discount 0.999 \
     --seed 0 \
     --max_steps 1000000 \
-    --eval_interval 10000 \
+    --eval_interval 5000 \
     --log_interval 500 \
     --checkpoint_interval 500000 \
     --eval_episodes 10 \
@@ -65,15 +65,16 @@ python -m examples.launch_train_sim_residual \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
     --target_entropy -35.0 \
-    --num_critic_updates 1 \
-    --num_actor_updates 8 \
+    --num_critic_updates 5 \
+    --num_actor_updates 1 \
     --use_huber_loss 0 \
     --huber_delta 1.0 \
-    --bc_reg_coeff 0.02 \
+    --bc_reg_coeff 0.5 \
     --bc_on_success_only 1 \
-    --success_buffer_ratio 0.2 \
+    --success_buffer_ratio 0.5 \
     --success_buffer_min_size 300 \
     --predict_a_exec 1 \
-    --bc_warmup_steps 10000 \
+    --bc_warmup_steps 0 \
     --bc_warmup_num_critic_updates 10 \
     --bc_warmup_num_actor_updates 5 \
+    --learn_std 1 \

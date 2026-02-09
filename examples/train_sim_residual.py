@@ -237,6 +237,8 @@ def main_residual(variant):
         kwargs['predict_a_exec'] = variant.get('predict_a_exec', False)
         kwargs['log_std_min'] = variant.get('log_std_min', -5.0)
         kwargs['log_std_max'] = variant.get('log_std_max', 2.0)
+        kwargs['learn_std'] = variant.get('learn_std', True)
+        kwargs['predict_a_exec'] = variant.get('predict_a_exec', False)
         agent = PixelSACResidualLearner(variant.seed, sample_obs, sample_action, **kwargs)
         print(f"Initialized Residual SAC with alpha={variant.residual_alpha}, predict_a_exec={variant.get('predict_a_exec', False)}")
     elif algo in ['q_weighted_pg', 'residual_grpo']:
@@ -267,6 +269,7 @@ def main_residual(variant):
         ppo_kwargs['log_std_min'] = variant.get('log_std_min', -5.0)
         ppo_kwargs['log_std_max'] = variant.get('log_std_max', 2.0)
         ppo_kwargs['predict_a_exec'] = variant.get('predict_a_exec', False)
+        ppo_kwargs['learn_std'] = variant.get('learn_std', True)
         agent = PixelPPOResidualLearner(variant.seed, sample_obs, sample_action, **ppo_kwargs)
         print(f"Initialized Residual {algo.upper()} with alpha={variant.residual_alpha}, predict_a_exec={variant.get('predict_a_exec', False)}")
     else:

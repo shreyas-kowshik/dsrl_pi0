@@ -5,9 +5,10 @@ This module implements actor updates for Residual RL where:
 - The actor outputs residual (delta) actions
 - The executed action is a_exec = clip(base_action + alpha * delta, -1, 1)
 
-Two update functions:
+Update functions:
 - update_actor_residual: SAC-style (maximize Q - alpha * log_prob)
-- update_actor_residual_ppo: Q-weighted PG / GRPO with PPO clipping
+- update_actor_residual_ppo: Q-weighted PG / GRPO style (maximize E_g[ Q_g * log pi(a_g | s) ] + entropy bonus)
+- update_actor_residual_ppo_onpolicy: On-policy PPO with stored old_log_probs
 """
 
 from typing import Dict, Tuple, Optional
@@ -418,9 +419,12 @@ def update_actor_residual_ppo(
 ) -> Tuple[TrainState, Dict[str, float]]:
     """Update actor for Residual Q-weighted PG / GRPO.
     
-    Uses stop_gradient on current actor for old_log_probs (no target actor).
-    Includes numerical stability fixes: log_ratio clamping, log_prob clamping,
-    and NaN guards on gradients.
+    Clean advantage-weighted regression (NOT PPO):
+        L = -E_g[ A_g * log pi(a_g | s) ] - entropy_coeff * H[pi]
+    
+    Since actions are sampled fresh from the current policy each call
+    (no environment interaction between old/new), importance ratios are
+    meaningless.  We directly weight log-probs by stop-gradient advantages.
     
     Args:
         key: PRNG key.
@@ -431,15 +435,15 @@ def update_actor_residual_ppo(
         query_frequency: Query frequency (chunk length).
         action_dim: Action dimension per step.
         grpo_num_samples: G, number of samples per state.
-        clip_epsilon: PPO clip epsilon.
-        clip_min_epsilon_multiplier: Multiplier for lower clip bound.
-        clip_max_epsilon_multiplier: Multiplier for upper clip bound.
+        clip_epsilon: Unused (kept for caller compatibility).
+        clip_min_epsilon_multiplier: Unused (kept for caller compatibility).
+        clip_max_epsilon_multiplier: Unused (kept for caller compatibility).
         entropy_coeff: Entropy bonus coefficient (default 1e-3 for stability).
         advantage_critic_reduction: 'min' or 'mean' for Q ensemble reduction.
         use_grpo_baseline: If True, use Q - mean(Q) (GRPO). If False, use raw Q.
         adv_clip_min: Optional lower bound for advantage clipping.
         adv_clip_max: Optional upper bound for advantage clipping.
-        log_ratio_clip: Clamp log_ratio to [-clip, clip] before exp (default 20.0).
+        log_ratio_clip: Unused (kept for caller compatibility).
         log_prob_clip: Clamp log_probs to [-clip, clip] (default 50.0).
         
     Returns:
@@ -476,19 +480,15 @@ def update_actor_residual_ppo(
     sample_keys = jax.random.split(sample_key, G)
     
     def sample_one(k):
-        delta, lp = frozen_dist.sample_and_log_prob(seed=k)
-        # Clamp log_probs for numerical stability
-        lp = jnp.clip(lp, -log_prob_clip, log_prob_clip)
-        return delta, lp
+        delta = frozen_dist.sample(seed=k)
+        return delta
     
-    delta_actions, old_log_probs = jax.vmap(sample_one)(sample_keys)  # (G, B, action_dim_flat), (G, B)
+    delta_actions = jax.vmap(sample_one)(sample_keys)  # (G, B, action_dim_flat)
     
-    # Stop gradient on old_log_probs (they are from frozen policy)
-    old_log_probs = jax.lax.stop_gradient(old_log_probs)
+    # Stop gradient — these are proposal actions from the frozen policy
     delta_actions = jax.lax.stop_gradient(delta_actions)
     
     chex.assert_shape(delta_actions, (G, B, action_dim_flat))
-    chex.assert_shape(old_log_probs, (G, B))
     
     # Step 2: Compute Q values for all samples
     # Note: these Q values are used as stop_gradient'd advantages, so jnp.clip is fine here.
@@ -548,39 +548,27 @@ def update_actor_residual_ppo(
             dist = actor.apply_fn({'params': actor_params}, batch['observations'])
             new_model_state = {}
         
-        # Compute current log probs for all G samples
+        # Compute current log probs for all G proposal actions
         # Clamp actions to (-1+eps, 1-eps) before log_prob to avoid atanh(±1)=±inf
         def compute_lp(delta_flat):
             safe_delta = _safe_clip_for_log_prob(delta_flat)
             lp = dist.log_prob(safe_delta)
-            # Clamp log_probs for numerical stability
             return jnp.clip(lp, -log_prob_clip, log_prob_clip)
         
         log_probs = jax.vmap(compute_lp)(delta_actions)  # (G, B)
         
-        # Flatten for PPO loss
-        log_probs_flat = log_probs.reshape(G * B)
-        old_log_probs_flat = old_log_probs.reshape(G * B)
-        advantages_flat = advantages.reshape(G * B)
+        # Flatten for advantage-weighted loss
+        log_probs_flat = log_probs.reshape(G * B)       # (G*B,)
+        advantages_flat = advantages.reshape(G * B)      # (G*B,)
         
-        # PPO clipped loss with log_ratio clamping for numerical stability
-        log_ratio = log_probs_flat - old_log_probs_flat
-        # Clamp log_ratio before exp to prevent Inf
-        log_ratio_clamped = jnp.clip(log_ratio, -log_ratio_clip, log_ratio_clip)
-        ratio = jnp.exp(log_ratio_clamped)
+        # Q-weighted policy gradient: L = -E[ A * log pi(a|s) ]
+        # No importance ratios — actions are from current policy (stop-gradient'd).
+        pg_loss = -(advantages_flat * log_probs_flat).mean()
         
-        lower_bound = 1.0 - clip_epsilon * clip_min_epsilon_multiplier
-        upper_bound = 1.0 + clip_epsilon * clip_max_epsilon_multiplier
-        clipped_ratio = jnp.clip(ratio, lower_bound, upper_bound)
-        
-        pg_loss = -jnp.mean(jnp.minimum(ratio * advantages_flat, clipped_ratio * advantages_flat))
-        
-        # Entropy bonus: use TanhNormal log_prob (includes Jacobian correction)
-        # to provide gradient that prevents the mean from saturating at boundaries.
-        # sample_and_log_prob computes log_prob from pre-tanh z, so it's stable.
-        _, entropy_log_probs = dist.sample_and_log_prob(seed=sample_key)
-        entropy_log_probs = jnp.clip(entropy_log_probs, -50.0, 50.0)
-        mean_entropy = (-entropy_log_probs).mean()  # TanhNormal entropy estimate
+        # Entropy bonus: average over G samples for lower variance
+        # (we already have G forward passes, so this is nearly free)
+        entropy_per_sample = -log_probs  # (G, B) — TanhNormal entropy estimate
+        mean_entropy = entropy_per_sample.mean()
         entropy_loss = -entropy_coeff * mean_entropy
         
         # BC regularization loss
@@ -597,12 +585,6 @@ def update_actor_residual_ppo(
         mean_dist = dist.distribution._loc
         std_diag_dist = dist.distribution._scale_diag
         log_std_dist = jnp.log(std_diag_dist + 1e-8)
-        
-        # PPO stats
-        approx_kl = ((ratio - 1) - log_ratio_clamped).mean()
-        ratio_clipped_upper = jnp.mean(ratio > upper_bound)
-        ratio_clipped_lower = jnp.mean(ratio < lower_bound)
-        log_ratio_clipped_frac = jnp.mean(jnp.abs(log_ratio) > log_ratio_clip)
         
         # Sample diagnostics from first sample
         delta_sample = delta_actions[0]
@@ -634,7 +616,6 @@ def update_actor_residual_ppo(
             'log_probs_mean': log_probs.mean(),
             'log_probs_min': log_probs.min(),
             'log_probs_max': log_probs.max(),
-            'old_log_probs_mean': old_log_probs.mean(),
             'mean_pi_norm': jnp.linalg.norm(mean_dist, axis=-1).mean(),
             'std_pi_norm': jnp.linalg.norm(std_diag_dist, axis=-1).mean(),
             'mean_pi_avg': mean_dist.mean(),
@@ -645,17 +626,6 @@ def update_actor_residual_ppo(
             'log_std_mean': log_std_dist.mean(),
             'log_std_min': log_std_dist.min(),
             'log_std_max': log_std_dist.max(),
-            # PPO stats
-            'ppo/ratio_mean': ratio.mean(),
-            'ppo/ratio_std': ratio.std(),
-            'ppo/ratio_min': ratio.min(),
-            'ppo/ratio_max': ratio.max(),
-            'ppo/approx_kl': approx_kl,
-            'ppo/ratio_clipped_upper': ratio_clipped_upper,
-            'ppo/ratio_clipped_lower': ratio_clipped_lower,
-            'ppo/log_ratio_mean': log_ratio.mean(),
-            'ppo/log_ratio_abs_max': jnp.abs(log_ratio).max(),
-            'ppo/log_ratio_clipped_frac': log_ratio_clipped_frac,
             # Residual diagnostics
             'actor/delta_norm_mean': delta_norm.mean(),
             'actor/clipping_rate': clipping_rate,

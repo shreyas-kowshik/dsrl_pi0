@@ -42,6 +42,7 @@ if __name__ == '__main__':
     parser.add_argument('--chunk_len', default=10, help='Action chunk length (Pi-0.5 horizon)', type=int)
     parser.add_argument('--use_zero_residual_initially', default=1, help='Use zero residual for first trajectory (1=yes, 0=no)', type=int)
     parser.add_argument('--predict_a_exec', default=0, help='Actor predicts a_exec directly instead of delta (1=yes, 0=no)', type=int)
+    parser.add_argument('--learn_std', default=1, help='Whether the policy learns a state-dependent std (1=yes, 0=no)', type=int)
     
     # Algorithm selection: 'residual_sac', 'q_weighted_pg', 'residual_grpo'
     parser.add_argument('--algo', default='residual_sac', help='Algorithm: residual_sac, q_weighted_pg, residual_grpo', type=str)
@@ -132,6 +133,7 @@ if __name__ == '__main__':
     variant['bc_on_success_only'] = bool(variant.get('bc_on_success_only', 0))
     variant['on_policy_ppo'] = bool(variant.get('on_policy_ppo', 0))
     variant['normalize_advantages'] = bool(variant.get('normalize_advantages', 0))
+    variant['learn_std'] = bool(variant.get('learn_std', 1))
     
     algo = variant.get('algo', 'residual_sac')
     print("=" * 60)
@@ -160,6 +162,7 @@ if __name__ == '__main__':
         print("  --- Update ratio ---")
         print(f"  num_critic_updates: {variant.get('num_critic_updates', 2)}")
         print(f"  num_actor_updates: {variant.get('num_actor_updates', 4)}")
+    print(f"  learn_std: {variant.get('learn_std', True)}")
     print("  --- BC Regularization ---")
     print(f"  bc_reg_coeff: {variant.get('bc_reg_coeff', 0.0)}")
     print(f"  bc_on_success_only: {variant.get('bc_on_success_only', False)}")

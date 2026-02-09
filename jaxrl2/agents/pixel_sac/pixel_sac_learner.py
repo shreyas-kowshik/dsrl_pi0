@@ -29,7 +29,7 @@ from jaxrl2.agents.pixel_sac.critic_updater import update_critic
 from jaxrl2.agents.pixel_sac.temperature_updater import update_temperature
 from jaxrl2.agents.pixel_sac.temperature import Temperature
 from jaxrl2.data.dataset import DatasetDict
-from jaxrl2.networks.learned_std_normal_policy import LearnedStdTanhNormalPolicy
+from jaxrl2.networks.learned_std_normal_policy import LearnedStdTanhNormalPolicy, FixedStdTanhNormalPolicy
 from jaxrl2.networks.values import StateActionEnsemble
 from jaxrl2.types import Params, PRNGKey
 from jaxrl2.utils.target_update import soft_target_update
@@ -123,7 +123,9 @@ class PixelSACLearner(Agent):
                  num_qs: int = 2,
                  target_entropy: float = None,
                  action_magnitude: float = 1.0,
-                 num_cameras: int = 1
+                 num_cameras: int = 1,
+                 learn_std: bool = True,
+                 fixed_log_std: float = -0.5,
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -172,7 +174,21 @@ class PixelSACLearner(Agent):
         if len(hidden_dims) == 1:
             hidden_dims = (hidden_dims[0], hidden_dims[0], hidden_dims[0])
         
-        policy_def = LearnedStdTanhNormalPolicy(hidden_dims, self.action_dim, dropout_rate=dropout_rate, low=-action_magnitude, high=action_magnitude)
+        if learn_std:
+            policy_def = LearnedStdTanhNormalPolicy(
+                hidden_dims, self.action_dim,
+                dropout_rate=dropout_rate,
+                low=-action_magnitude,
+                high=action_magnitude,
+            )
+        else:
+            policy_def = FixedStdTanhNormalPolicy(
+                hidden_dims, self.action_dim,
+                dropout_rate=dropout_rate,
+                fixed_log_std=fixed_log_std,
+                low=-action_magnitude,
+                high=action_magnitude,
+            )
 
         actor_def = PixelMultiplexer(encoder=encoder_def,
                                      network=policy_def,

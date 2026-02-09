@@ -40,7 +40,7 @@ from jaxrl2.networks.encoders.resnet_encoderv2 import ResNetV2Encoder
 from jaxrl2.agents.pixel_sac.residual_actor_updater import update_actor_residual_ppo, update_actor_residual_ppo_onpolicy, update_actor_bc_residual
 from jaxrl2.agents.pixel_sac.residual_critic_updater import update_critic_residual
 from jaxrl2.data.dataset import DatasetDict
-from jaxrl2.networks.learned_std_normal_policy import LearnedStdTanhNormalPolicy
+from jaxrl2.networks.learned_std_normal_policy import LearnedStdTanhNormalPolicy, FixedStdTanhNormalPolicy
 from jaxrl2.networks.values import StateActionEnsemble
 from jaxrl2.types import Params, PRNGKey
 from jaxrl2.utils.target_update import soft_target_update
@@ -409,6 +409,9 @@ class PixelPPOResidualLearner(Agent):
         bc_on_success_only: bool = False,
         # Action prediction mode
         predict_a_exec: bool = False,
+        # Policy std mode
+        learn_std: bool = True,
+        fixed_log_std: float = -0.5,
         # Other
         decay_steps: Optional[int] = None,
         cnn_features: Sequence[int] = (32, 64, 128, 256),
@@ -489,14 +492,23 @@ class PixelPPOResidualLearner(Agent):
             hidden_dims = (hidden_dims[0], hidden_dims[0], hidden_dims[0])
         
         # Actor: outputs residual actions (delta) in [-action_magnitude, action_magnitude]
-        policy_def = LearnedStdTanhNormalPolicy(
-            hidden_dims, self.action_dim, 
-            dropout_rate=dropout_rate, 
-            log_std_min=log_std_min,
-            log_std_max=log_std_max,
-            low=-action_magnitude, 
-            high=action_magnitude
-        )
+        if learn_std:
+            policy_def = LearnedStdTanhNormalPolicy(
+                hidden_dims, self.action_dim, 
+                dropout_rate=dropout_rate, 
+                log_std_min=log_std_min,
+                log_std_max=log_std_max,
+                low=-action_magnitude, 
+                high=action_magnitude
+            )
+        else:
+            policy_def = FixedStdTanhNormalPolicy(
+                hidden_dims, self.action_dim,
+                dropout_rate=dropout_rate,
+                fixed_log_std=fixed_log_std,
+                low=-action_magnitude,
+                high=action_magnitude,
+            )
 
         actor_def = PixelMultiplexer(
             encoder=encoder_def,
