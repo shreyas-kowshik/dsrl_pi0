@@ -5,7 +5,8 @@ import pathlib
 from flax.training.train_state import TrainState
 
 from jaxrl2.agents.common import (eval_actions_jit, eval_log_prob_jit, eval_mse_jit, eval_reward_function_jit,
-                                  sample_actions_jit, sample_actions_with_log_prob_jit)
+                                  sample_actions_jit, sample_actions_with_log_prob_jit,
+                                  compute_log_prob_jit)
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.types import PRNGKey
 
@@ -57,6 +58,23 @@ class Agent(object):
 
         self._rng = rng
         return np.asarray(actions), np.asarray(log_probs)
+
+    def compute_log_prob(self, observations: np.ndarray, actions: np.ndarray) -> np.ndarray:
+        """Compute log probability of given actions under current policy.
+        
+        Clamps actions to (-1+eps, 1-eps) to avoid atanh(±1)=inf in TanhNormal.
+        
+        Args:
+            observations: Observation dict.
+            actions: Actions to evaluate, shape (B, action_dim_flat).
+            
+        Returns:
+            log_probs as numpy array.
+        """
+        log_probs = compute_log_prob_jit(
+            self._actor.apply_fn, self._actor.params,
+            observations, actions, get_batch_stats(self._actor))
+        return np.asarray(log_probs)
 
     @property
     def _save_dict(self):

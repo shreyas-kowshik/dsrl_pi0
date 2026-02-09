@@ -53,7 +53,7 @@ python -m examples.launch_train_sim_residual \
     --log_interval 500 \
     --checkpoint_interval 500000 \
     --eval_episodes 50 \
-    --multi_grad_step 1 \
+    --multi_grad_step 10 \
     --start_online_updates 500 \
     --resize_image 100 \
     --action_magnitude 1.0 \
@@ -64,7 +64,7 @@ python -m examples.launch_train_sim_residual \
     --residual_alpha 0.0 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
-    --target_entropy -105.0 \
+    --target_entropy -35.0 \
     --num_critic_updates 1 \
     --num_actor_updates 8 \
     --use_huber_loss 0 \

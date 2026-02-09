@@ -114,7 +114,7 @@ if __name__ == '__main__':
         action_magnitude=1.0,
         num_cameras=1,
         backup_entropy=False,
-        critic_pop_base_actions=False,
+        critic_pop_base_actions=True,
         clip_temp=True,
         clip_min_temp=0.01,
         clip_max_temp=2.0,

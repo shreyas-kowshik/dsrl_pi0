@@ -118,6 +118,31 @@ def sample_actions_with_log_prob_jit(
     return rng, actions, log_probs
 
 
+@partial(jax.jit, static_argnames='actor_apply_fn')
+def compute_log_prob_jit(
+        actor_apply_fn: Callable[..., distrax.Distribution],
+        actor_params: Params,
+        observations: np.ndarray,
+        actions: np.ndarray,
+        actor_batch_stats: Any) -> jnp.ndarray:
+    """Compute log probability of given actions under the current policy.
+    
+    Clamps actions to (-1+eps, 1-eps) before log_prob to avoid atanh(±1)=±inf
+    in TanhNormal distributions.
+    
+    Returns:
+        log_probs: (B,) log probabilities.
+    """
+    input_collections = {'params': actor_params}
+    if actor_batch_stats is not None:
+        input_collections['batch_stats'] = actor_batch_stats
+    dist = actor_apply_fn(input_collections, observations)
+    # Clamp to avoid atanh(±1) = ±inf
+    safe_actions = jnp.clip(actions, -1.0 + 1e-6, 1.0 - 1e-6)
+    log_probs = dist.log_prob(safe_actions)
+    return jnp.clip(log_probs, -50.0, 50.0)
+
+
 class ModuleDict(nn.Module):
     """
     from https://github.com/rail-berkeley/jaxrl_minimal/blob/main/jaxrl_m/common/common.py#L33

@@ -484,38 +484,43 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
                 delta_actions = np.zeros((query_frequency, variant.action_dim))
                 
                 if in_bc_warmup:
-                    # During BC warmup: skip log_prob computation entirely.
-                    # old_log_probs are only used by on-policy PPO importance weights,
-                    # and we're doing BC during warmup, so they're never consumed.
-                    # Computing log_prob here is wasteful and risks NaN from the
-                    # TanhNormal Jacobian in high-dimensional action spaces.
-                    log_prob = 0.0
+                    # During BC warmup: compute log_prob of the zero-residual action
+                    # so that old_log_probs are stored consistently for all transitions.
+                    if predict_a_exec:
+                        eval_actions_flat = np.clip(base_actions[:query_frequency], -1.0, 1.0).reshape(1, -1)
+                    else:
+                        eval_actions_flat = delta_actions.reshape(1, -1)
+                    log_prob = agent.compute_log_prob(obs_dict, eval_actions_flat)
+                    log_prob = float(np.squeeze(log_prob))
                     if t == 0:
-                        print(f"[BC warmup] Forcing zero residual (skipping log_prob)")
+                        print(f"[BC warmup] Forcing zero residual (log_prob={log_prob:.4f})")
                 else:
                     # First trajectory (initial eval): compute log_prob for PPO correctness
                     if predict_a_exec:
                         eval_actions_flat = np.clip(base_actions[:query_frequency], -1.0, 1.0).reshape(1, -1)
                     else:
                         eval_actions_flat = delta_actions.reshape(1, -1)
-                    dist = agent._actor.apply_fn(
-                        {'params': agent._actor.params}, obs_dict
-                    )
-                    log_prob = float(dist.log_prob(jnp.array(eval_actions_flat)).squeeze())
-                    log_prob = float(np.clip(log_prob, -50.0, 50.0))
+                    # Use compute_log_prob which safely clamps to avoid atanh(±1)
+                    log_prob = agent.compute_log_prob(obs_dict, eval_actions_flat)
+                    log_prob = float(np.squeeze(log_prob))
                     if t == 0:
                         print(f"[t={t}] Using zero residual (initial eval) (log_prob={log_prob:.4f})")
                 
                 # Compose executed action (base only)
                 actions = np.clip(base_actions[:query_frequency], -1.0, 1.0)
             else:
-                # SAC samples actions
+                # Use deterministic (mode) actions for rollouts.
+                # Exploration comes from the stochastic base policy, not from
+                # sampling noise in the residual — sampling adds jitter.
                 if on_policy_ppo:
-                    actions_flat, log_prob = agent.sample_actions_with_log_prob(obs_dict)
-                    # log_prob is (1,) for single obs, squeeze to scalar
+                    # On-policy PPO: use mode action but compute its log_prob
+                    # under current policy for importance weighting.
+                    actions_flat = agent.eval_actions(obs_dict)  # mode (deterministic)
+                    # Compute log_prob of the mode action
+                    log_prob = agent.compute_log_prob(obs_dict, actions_flat)
                     log_prob = float(np.squeeze(log_prob))
                 else:
-                    actions_flat = agent.sample_actions(obs_dict)  # (1, query_frequency * action_dim)
+                    actions_flat = agent.eval_actions(obs_dict)  # mode (deterministic)
                     log_prob = 0.0  # not needed for off-policy
                 raw_actions = np.reshape(actions_flat, (query_frequency, variant.action_dim))
                 

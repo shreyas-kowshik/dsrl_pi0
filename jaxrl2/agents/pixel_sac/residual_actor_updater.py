@@ -30,6 +30,30 @@ def _cosine_sim(a, b, eps=1e-8):
     return (jnp.sum(a * b, axis=-1) / (an * bn + eps))
 
 
+def _soft_clip(x, lo=-1.0, hi=1.0, margin=0.05):
+    """Differentiable soft-clip using tanh at boundaries.
+    
+    Inside [lo+margin, hi-margin] this is identity.
+    Outside, it smoothly saturates toward lo/hi via tanh.
+    Gradient is always non-zero, unlike jnp.clip.
+    """
+    mid = (hi + lo) / 2.0
+    half_range = (hi - lo) / 2.0
+    # Normalize to [-1, 1] range
+    x_norm = (x - mid) / half_range
+    # Apply tanh-based soft saturation
+    return mid + half_range * jnp.tanh(x_norm)
+
+
+def _safe_clip_for_log_prob(x, eps=1e-6):
+    """Clamp actions to (-1+eps, 1-eps) to avoid atanh(±1) = ±inf in log_prob.
+    
+    This is used when computing log_prob of stored/clipped actions that may
+    sit exactly at ±1.0 due to hard clipping during collection.
+    """
+    return jnp.clip(x, -1.0 + eps, 1.0 - eps)
+
+
 def update_actor_residual(
         key: PRNGKey, 
         actor: TrainState, 
@@ -118,13 +142,17 @@ def update_actor_residual(
         actions_chunked = actions_sampled.reshape(B, query_frequency, A)
         
         if predict_a_exec:
-            # Actor predicts a_exec directly
-            a_exec = jnp.clip(actions_chunked, -1.0, 1.0)
+            # Actor predicts a_exec directly.
+            # TanhNormal output is already in (-1, 1) — no clipping needed.
+            # Using jnp.clip or _soft_clip here would either kill gradients
+            # or apply a second squashing function (double-tanh).
+            a_exec = actions_chunked
             delta_actions_chunked = (a_exec - base_action[:, :query_frequency, :])
         else:
             # Original: actor predicts delta, compose a_exec
             delta_actions_chunked = actions_chunked
-            a_exec = jnp.clip(base_action[:, :query_frequency, :] + residual_alpha * actions_chunked, -1.0, 1.0)
+            # Use _soft_clip to preserve gradients when base + alpha*delta hits bounds
+            a_exec = _soft_clip(base_action[:, :query_frequency, :] + residual_alpha * actions_chunked, -1.0, 1.0)
         
         a_exec_flat = a_exec.reshape(a_exec.shape[0], -1)  # (B, chunk_len * action_dim)
         delta_actions = delta_actions_chunked.reshape(B, query_frequency * A)  # for logging
@@ -150,16 +178,27 @@ def update_actor_residual(
         else:
             raise ValueError(f"Invalid critic reduction: {critic_reduction}")
         
-        # Actor loss: maximize Q, minimize entropy cost
+        # Actor loss: maximize Q + alpha * entropy.
+        # We use the FULL TanhNormal log_prob (from sample_and_log_prob) which
+        # includes the Jacobian correction -log(1-tanh^2(z)). This term is
+        # critical: it provides gradient to the mean that pushes it away from
+        # the tanh saturation boundaries. Without it, the mean is free to grow
+        # unboundedly, causing all actions to saturate at ±1.
+        #
+        # The Jacobian correction is computed from the pre-tanh sample z (not
+        # via atanh), so it's numerically stable. We clip the final log_prob
+        # to [-50, 50] as a safety net for extreme cases.
         alpha_val = temp.apply_fn({'params': temp.params})
-        rl_loss = (alpha_val * log_probs - q).mean()
+        log_probs_clipped = jnp.clip(log_probs, -50.0, 50.0)
+        base_entropy = dist.distribution.entropy()  # (B,) — for diagnostics
+        rl_loss = (-q + alpha_val * log_probs_clipped).mean()
         
         # BC regularization loss (stored-action NLL)
         bc_loss_val = jnp.array(0.0)
         bc_info = {}
         if bc_flag:
             bc_loss_val, bc_info = compute_bc_loss_residual(
-                dist, batch, query_frequency, bc_on_success_only
+                dist, batch, query_frequency, bc_on_success_only, key=key_act
             )
         
         actor_loss = rl_loss + bc_reg_coeff * bc_loss_val
@@ -206,7 +245,9 @@ def update_actor_residual(
 
         things_to_log = {
             'actor_loss': actor_loss,
-            'entropy': -log_probs.mean(),
+            'entropy': (-log_probs_clipped).mean(),  # TanhNormal entropy — used by temperature auto-tuning
+            'base_gaussian_entropy': base_entropy.mean(),  # Gaussian entropy — diagnostic only
+            'tanh_log_prob_mean': log_probs.mean(),  # raw (unclipped) for diagnostics
             'q_pi_in_actor': q.mean(),
             'mean_pi_norm': mean_dist_norm.mean(),
             'std_pi_norm': std_dist_norm.mean(),
@@ -238,7 +279,7 @@ def update_actor_residual(
             'collapse/cos_base_delta_std': cos_base_delta.std(),
             'collapse/cos_base_exec_change_mean': cos_base_exec_change.mean(),
             'collapse/alpha_temp': alpha_val,
-            'collapse/alpha_logp_mean': (alpha_val * log_probs).mean(),
+            'collapse/alpha_entropy_mean': (alpha_val * (-log_probs_clipped)).mean(),
             'actor/rl_loss': rl_loss,
             'bc/reg_coeff': bc_reg_coeff,
             'bc/weighted_loss': bc_reg_coeff * bc_loss_val,
@@ -269,16 +310,16 @@ def compute_bc_loss_residual(
         batch: DatasetDict,
         query_frequency: int,
         bc_on_success_only: bool = False,
+        key: PRNGKey = None,
 ) -> Tuple[jnp.ndarray, Dict[str, float]]:
-    """Compute BC regularization loss (MSE between policy mode and stored actions).
+    """Compute BC regularization loss (MSE between policy sample and stored actions).
+    
+    Uses sample-based MSE instead of mode-based MSE to provide gradient signal
+    to both mean AND std via the reparameterization trick. Using mode() would
+    make the loss independent of std, causing std to collapse to zero.
     
     Uses MSE instead of NLL to avoid numerical issues with atanh(±1) = ±∞
     when stored actions are near the action bounds.
-    
-    Encourages the actor to reproduce the stored delta (residual) actions from
-    the replay buffer, which are the actions that led to the observed transitions.
-    When bc_on_success_only=True, the loss is computed only on transitions from
-    successful episodes (using the success_flag in the batch).
     
     This function is meant to be called INSIDE actor_loss_fn, using the `dist`
     already constructed from the candidate actor_params being differentiated.
@@ -290,6 +331,7 @@ def compute_bc_loss_residual(
             - success_flag: (B,) binary flag (1.0 = success episode, 0.0 = failure)
         query_frequency: Chunk length.
         bc_on_success_only: If True, only compute BC loss on success transitions.
+        key: PRNG key for sampling. Required for reparameterized sample.
         
     Returns:
         bc_loss: Scalar BC loss (MSE, possibly masked).
@@ -300,12 +342,14 @@ def compute_bc_loss_residual(
     B = stored_actions.shape[0]
     stored_actions_flat = stored_actions.reshape(B, -1)  # (B, query_freq * action_dim)
     
-    # Policy mode (deterministic action): tanh(mean) rescaled to [low, high]
-    # This avoids log_prob/atanh which causes NaN at action boundaries
+    # Sample from policy (reparameterized) for gradient to both mean and std.
+    # Using mode() would only give gradient to mean, causing std collapse.
+    policy_sample = dist.sample(seed=key)  # (B, action_dim_flat)
+    # Also compute mode for diagnostics only (not in loss)
     policy_mode = dist.mode()  # (B, action_dim_flat)
     
     # Per-sample MSE: mean over action dimensions, keep batch dim
-    mse_per_sample = jnp.mean((policy_mode - stored_actions_flat) ** 2, axis=-1)  # (B,)
+    mse_per_sample = jnp.mean((policy_sample - stored_actions_flat) ** 2, axis=-1)  # (B,)
     
     if bc_on_success_only:
         # Mask: only include transitions from successful episodes
@@ -322,6 +366,8 @@ def compute_bc_loss_residual(
         'bc/mse_mean': jnp.mean(mse_per_sample),
         'bc/mse_max': jnp.max(mse_per_sample),
         'bc/mse_min': jnp.min(mse_per_sample),
+        'bc/sample_mean': jnp.mean(policy_sample),
+        'bc/sample_std': jnp.std(policy_sample),
         'bc/mode_mean': jnp.mean(policy_mode),
         'bc/mode_std': jnp.std(policy_mode),
         'bc/stored_action_mean': jnp.mean(stored_actions_flat),
@@ -445,6 +491,8 @@ def update_actor_residual_ppo(
     chex.assert_shape(old_log_probs, (G, B))
     
     # Step 2: Compute Q values for all samples
+    # Note: these Q values are used as stop_gradient'd advantages, so jnp.clip is fine here.
+    # The clip here is for valid critic evaluation, not for gradient flow.
     def compute_q_for_sample(action_flat):
         action_chunked = action_flat.reshape(B, query_frequency, action_dim)
         if predict_a_exec:
@@ -483,6 +531,9 @@ def update_actor_residual_ppo(
     if adv_clip_min is not None or adv_clip_max is not None:
         advantages = jnp.clip(advantages, adv_clip_min, adv_clip_max)
     
+    # Stop gradient on advantages (they are from frozen critic, should not backprop)
+    advantages = jax.lax.stop_gradient(advantages)
+    
     def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, Tuple[Dict[str, float], Dict]]:
         # Get current distribution
         if hasattr(actor, 'batch_stats') and actor.batch_stats is not None:
@@ -498,8 +549,10 @@ def update_actor_residual_ppo(
             new_model_state = {}
         
         # Compute current log probs for all G samples
+        # Clamp actions to (-1+eps, 1-eps) before log_prob to avoid atanh(±1)=±inf
         def compute_lp(delta_flat):
-            lp = dist.log_prob(delta_flat)
+            safe_delta = _safe_clip_for_log_prob(delta_flat)
+            lp = dist.log_prob(safe_delta)
             # Clamp log_probs for numerical stability
             return jnp.clip(lp, -log_prob_clip, log_prob_clip)
         
@@ -522,17 +575,20 @@ def update_actor_residual_ppo(
         
         pg_loss = -jnp.mean(jnp.minimum(ratio * advantages_flat, clipped_ratio * advantages_flat))
         
-        # Entropy from base distribution
-        base_entropy = dist.distribution.entropy()  # (B,)
-        mean_entropy = base_entropy.mean()
+        # Entropy bonus: use TanhNormal log_prob (includes Jacobian correction)
+        # to provide gradient that prevents the mean from saturating at boundaries.
+        # sample_and_log_prob computes log_prob from pre-tanh z, so it's stable.
+        _, entropy_log_probs = dist.sample_and_log_prob(seed=sample_key)
+        entropy_log_probs = jnp.clip(entropy_log_probs, -50.0, 50.0)
+        mean_entropy = (-entropy_log_probs).mean()  # TanhNormal entropy estimate
         entropy_loss = -entropy_coeff * mean_entropy
         
-        # BC regularization loss (stored-action NLL)
+        # BC regularization loss
         bc_loss_val = jnp.array(0.0)
         bc_info = {}
         if bc_flag:
             bc_loss_val, bc_info = compute_bc_loss_residual(
-                dist, batch, query_frequency, bc_on_success_only
+                dist, batch, query_frequency, bc_on_success_only, key=sample_key
             )
         
         actor_loss = pg_loss + entropy_loss + bc_reg_coeff * bc_loss_val
@@ -738,8 +794,12 @@ def update_actor_residual_ppo_onpolicy(
             dist = actor.apply_fn({'params': actor_params}, batch['observations'])
             new_model_state = {}
         
-        # Current log prob of the stored actions
-        log_probs = dist.log_prob(stored_actions_flat)  # (B,)
+        # Current log prob of the stored actions.
+        # Clamp to (-1+eps, 1-eps) before log_prob to avoid atanh(±1)=±inf.
+        # This is critical when predict_a_exec=True because stored actions
+        # are hard-clipped a_exec values that can sit exactly at ±1.0.
+        safe_stored = _safe_clip_for_log_prob(stored_actions_flat)
+        log_probs = dist.log_prob(safe_stored)  # (B,)
         log_probs = jnp.clip(log_probs, -log_prob_clip, log_prob_clip)
         
         # PPO clipped loss with proper importance weights
@@ -753,9 +813,11 @@ def update_actor_residual_ppo_onpolicy(
         
         pg_loss = -jnp.mean(jnp.minimum(ratio * advantages, clipped_ratio * advantages))
         
-        # Entropy from base distribution
-        base_entropy = dist.distribution.entropy()  # (B,)
-        mean_entropy = base_entropy.mean()
+        # Entropy bonus: use TanhNormal log_prob (includes Jacobian correction)
+        # to provide gradient that prevents the mean from saturating at boundaries.
+        _, entropy_log_probs = dist.sample_and_log_prob(seed=key)
+        entropy_log_probs = jnp.clip(entropy_log_probs, -50.0, 50.0)
+        mean_entropy = (-entropy_log_probs).mean()  # TanhNormal entropy estimate
         entropy_loss = -entropy_coeff * mean_entropy
         
         # BC regularization loss
@@ -763,7 +825,7 @@ def update_actor_residual_ppo_onpolicy(
         bc_info = {}
         if bc_flag:
             bc_loss_val, bc_info = compute_bc_loss_residual(
-                dist, batch, query_frequency, bc_on_success_only
+                dist, batch, query_frequency, bc_on_success_only, key=key
             )
         
         actor_loss = pg_loss + entropy_loss + bc_reg_coeff * bc_loss_val
@@ -919,12 +981,16 @@ def update_actor_bc_residual(
             dist = actor.apply_fn({'params': actor_params}, batch['observations'])
             new_model_state = {}
         
-        # Policy mode (deterministic action): avoids log_prob / atanh issues
-        policy_mode = dist.mode()  # (B, action_dim_flat)
+        # Sample-based MSE: trains both mean and std via reparameterization trick
+        # Avoids atanh boundary issues from log_prob while providing gradient to std
+        sampled_actions = dist.sample(seed=key)  # (B, action_dim_flat)
         
-        # MSE loss between policy mode and BC target
-        mse_per_sample = jnp.mean((policy_mode - bc_target) ** 2, axis=-1)  # (B,)
+        # MSE loss between sampled actions and BC target
+        mse_per_sample = jnp.mean((sampled_actions - bc_target) ** 2, axis=-1)  # (B,)
         bc_loss = jnp.mean(mse_per_sample)
+        
+        # Also compute mode for diagnostics (not used in loss)
+        policy_mode = dist.mode()  # (B, action_dim_flat)
         
         # Distribution diagnostics
         mean_dist = dist.distribution._loc
@@ -935,16 +1001,16 @@ def update_actor_bc_residual(
         base_entropy = dist.distribution.entropy()  # (B,)
         mean_entropy = base_entropy.mean()
         
-        # Compute a_exec from policy mode for diagnostics
-        policy_mode_chunked = policy_mode.reshape(B, query_frequency, A)
+        # Compute a_exec from sampled actions for diagnostics
+        sampled_actions_chunked = sampled_actions.reshape(B, query_frequency, A)
         if predict_a_exec:
-            a_exec = jnp.clip(policy_mode_chunked, -1.0, 1.0)
+            a_exec = jnp.clip(sampled_actions_chunked, -1.0, 1.0)
             delta_from_base = a_exec - base_action[:, :query_frequency, :]
         else:
             a_exec = jnp.clip(
-                base_action[:, :query_frequency, :] + policy_mode_chunked, -1.0, 1.0
+                base_action[:, :query_frequency, :] + sampled_actions_chunked, -1.0, 1.0
             )
-            delta_from_base = policy_mode_chunked
+            delta_from_base = sampled_actions_chunked
         
         delta_norm = jnp.linalg.norm(delta_from_base.reshape(B, -1), axis=-1)
         base_flat = base_action[:, :query_frequency, :].reshape(B, -1)
@@ -952,6 +1018,8 @@ def update_actor_bc_residual(
         a_exec_norm = jnp.linalg.norm(a_exec.reshape(B, -1), axis=-1)
         clipping_rate = (jnp.abs(a_exec) >= 1.0).mean()
         bc_target_norm = jnp.linalg.norm(bc_target, axis=-1)
+        # Fraction of raw base_action values outside [-1, 1] (before clipping)
+        base_out_of_range = (jnp.abs(base_flat) > 1.0).mean()
         
         info = {
             'actor_loss': bc_loss,
@@ -959,12 +1027,15 @@ def update_actor_bc_residual(
             'bc_warmup/mse_per_sample_mean': mse_per_sample.mean(),
             'bc_warmup/mse_per_sample_max': mse_per_sample.max(),
             'bc_warmup/mse_per_sample_min': mse_per_sample.min(),
+            'bc_warmup/sampled_action_mean': sampled_actions.mean(),
+            'bc_warmup/sampled_action_std': jnp.std(sampled_actions),
             'bc_warmup/policy_mode_mean': policy_mode.mean(),
             'bc_warmup/policy_mode_std': jnp.std(policy_mode),
             'bc_warmup/target_mean': bc_target.mean(),
             'bc_warmup/target_std': jnp.std(bc_target),
             'bc_warmup/delta_norm_mean': delta_norm.mean(),
             'bc_warmup/base_norm_mean': base_norm.mean(),
+            'bc_warmup/base_out_of_range_frac': base_out_of_range,
             'bc_warmup/clipping_rate': clipping_rate,
             'bc_warmup/is_warmup': 1.0,
             # Standard actor diagnostics (for continuity in wandb)

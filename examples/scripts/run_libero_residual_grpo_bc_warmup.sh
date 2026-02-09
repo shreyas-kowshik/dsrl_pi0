@@ -88,9 +88,10 @@ python -m examples.launch_train_sim_residual \
     --success_buffer_ratio 0.0 \
     --success_buffer_min_size 100 \
     --on_policy_ppo 0 \
-    --normalize_advantages 0 \
+    --normalize_advantages 1 \
     --log_std_min -5.0 \
     --log_std_max 2.0 \
-    --bc_warmup_steps 50000 \
+    --predict_a_exec 1 \
+    --bc_warmup_steps 10000 \
     --bc_warmup_num_critic_updates 10 \
     --bc_warmup_num_actor_updates 1

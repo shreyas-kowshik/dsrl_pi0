@@ -43,13 +43,13 @@ pip install mujoco==3.3.1
 python -m examples.launch_train_sim_residual \
     --algorithm residual_sac \
     --env libero \
-    --prefix r-sac-a-exec_pi5_2moka-pots-ckpt-crct-bc-wrrm-up \
+    --prefix r-sac-a-exec_pi5_2moka-pots-ckpt-crct-bc-wrrm-up-v3-sampled-actions-crtc-pop-base-act-ent-35 \
     --wandb_project ${proj_name} \
     --batch_size 256 \
     --discount 0.999 \
     --seed 0 \
     --max_steps 1000000 \
-    --eval_interval 20000 \
+    --eval_interval 10000 \
     --log_interval 500 \
     --checkpoint_interval 500000 \
     --eval_episodes 10 \
@@ -64,7 +64,7 @@ python -m examples.launch_train_sim_residual \
     --residual_alpha 1.0 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
-    --target_entropy -105.0 \
+    --target_entropy -35.0 \
     --num_critic_updates 1 \
     --num_actor_updates 8 \
     --use_huber_loss 0 \
@@ -74,6 +74,6 @@ python -m examples.launch_train_sim_residual \
     --success_buffer_ratio 0.2 \
     --success_buffer_min_size 300 \
     --predict_a_exec 1 \
-    --bc_warmup_steps 50000 \
+    --bc_warmup_steps 10000 \
     --bc_warmup_num_critic_updates 10 \
     --bc_warmup_num_actor_updates 5 \
