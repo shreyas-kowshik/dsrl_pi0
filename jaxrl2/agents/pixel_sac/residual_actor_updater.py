@@ -886,6 +886,305 @@ def update_actor_residual_ppo_onpolicy(
     return new_actor, info
 
 
+def update_actor_residual_parl(
+        key: PRNGKey,
+        actor: TrainState,
+        critic: TrainState,
+        batch: DatasetDict,
+        residual_alpha: float,
+        query_frequency: int,
+        action_dim: int,
+        parl_num_samples: int = 16,
+        parl_num_elites: int = 4,
+        parl_num_grad_steps: int = 5,
+        parl_step_size: float = 0.01,
+        critic_reduction: str = 'min',
+        predict_a_exec: bool = False,
+) -> Tuple[TrainState, Dict[str, float]]:
+    """Update actor via Policy-Agnostic RL (PARL) for residual setting.
+    
+    PARL decouples actor training from policy gradient entirely:
+    1. Sample N action candidates from the current actor pi_theta(s),
+       plus the base policy action as an additional (N+1)-th candidate
+    2. Evaluate all N+1 with critic Q(s, a_exec), keep top-K elites
+    3. Refine elites via gradient ascent: a <- a + eta * grad_a Q(s, a)
+    4. Pick the best refined action as the distillation target a*
+    5. Train the actor to imitate a* via MSE loss (BC distillation)
+    
+    Including the base policy action ensures the residual never degrades
+    below the base policy's quality — if the base action has highest Q,
+    it will be selected as the distillation target.
+    
+    The actor never differentiates through the critic — the critic only
+    provides stop-gradient targets. This avoids issues with tanh squashing,
+    action clipping killing gradients, etc.
+    
+    Args:
+        key: PRNG key.
+        actor: Current actor TrainState.
+        critic: Critic TrainState (used for Q-evaluation and gradient ascent).
+        batch: Batch of transitions.
+        residual_alpha: Scaling factor for residual actions.
+        query_frequency: Chunk length for action queries.
+        action_dim: Action dimension per step.
+        parl_num_samples: N, number of action candidates to sample from actor.
+        parl_num_elites: K, number of top-Q actions to keep for refinement.
+        parl_num_grad_steps: Number of gradient ascent steps on Q w.r.t. action.
+        parl_step_size: Step size (learning rate) for gradient ascent on actions.
+        critic_reduction: How to reduce Q ensemble ('min' or 'mean').
+        predict_a_exec: If True, actor predicts a_exec directly (not delta).
+        
+    Returns:
+        Updated actor TrainState and info dict.
+    """
+    key, sample_key, select_key = jax.random.split(key, 3)
+    
+    # Extract base actions from observations
+    base_action_raw = batch['observations']['base_action']
+    base_action = jnp.squeeze(base_action_raw, axis=-1)  # (B, T, A)
+    B, T, A = base_action.shape
+    action_dim_flat = query_frequency * action_dim
+    N = parl_num_samples
+    K = parl_num_elites
+    
+    # ----------------------------------------------------------------
+    # Step 1: Sample N action candidates from current actor (frozen)
+    # ----------------------------------------------------------------
+    frozen_dist = actor.apply_fn(
+        {'params': jax.lax.stop_gradient(actor.params)},
+        batch['observations']
+    )
+    
+    sample_keys = jax.random.split(sample_key, N)
+    
+    def sample_one(k):
+        return frozen_dist.sample(seed=k)  # (B, action_dim_flat)
+    
+    # (N, B, action_dim_flat)
+    delta_candidates = jax.vmap(sample_one)(sample_keys)
+    delta_candidates = jax.lax.stop_gradient(delta_candidates)
+    
+    # ----------------------------------------------------------------
+    # Step 2: Evaluate Q for all candidates → keep top-K elites
+    # ----------------------------------------------------------------
+    # Include the base policy action as an additional candidate.
+    # The base action IS already a valid a_exec (no residual needed).
+    base_a_exec_flat = jnp.clip(
+        base_action[:, :query_frequency, :], -1.0, 1.0
+    ).reshape(B, action_dim_flat)  # (B, action_dim_flat)
+    
+    def delta_to_a_exec_flat(delta_flat):
+        """Convert actor output (delta or a_exec) to executed action for critic."""
+        delta_chunked = delta_flat.reshape(B, query_frequency, action_dim)
+        if predict_a_exec:
+            a_exec = jnp.clip(delta_chunked, -1.0, 1.0)
+        else:
+            a_exec = jnp.clip(
+                base_action[:, :query_frequency, :] + residual_alpha * delta_chunked,
+                -1.0, 1.0
+            )
+        return a_exec.reshape(B, action_dim_flat)
+    
+    def compute_q(a_exec_flat):
+        """Evaluate critic on a_exec_flat (B, action_dim_flat) → (B,)."""
+        qs = critic.apply_fn(
+            {'params': critic.params},
+            batch['observations'], a_exec_flat
+        )  # (num_qs, B)
+        if critic_reduction == 'min':
+            return qs.min(axis=0)
+        else:
+            return qs.mean(axis=0)
+    
+    # Evaluate all N actor candidates: (N, B, action_dim_flat) → (N, B)
+    a_exec_actor = jax.vmap(delta_to_a_exec_flat)(delta_candidates)  # (N, B, action_dim_flat)
+    q_actor = jax.vmap(compute_q)(a_exec_actor)  # (N, B)
+    
+    # Append base policy action as the (N+1)-th candidate
+    # a_exec_candidates: (N+1, B, action_dim_flat), q_candidates: (N+1, B)
+    a_exec_candidates = jnp.concatenate(
+        [a_exec_actor, base_a_exec_flat[None, :, :]], axis=0
+    )  # (N+1, B, action_dim_flat)
+    q_base = compute_q(base_a_exec_flat)  # (B,)
+    q_candidates = jnp.concatenate(
+        [q_actor, q_base[None, :]], axis=0
+    )  # (N+1, B)
+    
+    # Select top-K per batch element from N+1 candidates
+    # Transpose to (B, N+1) for per-batch-element sorting
+    q_candidates_T = q_candidates.T  # (B, N+1)
+    a_exec_candidates_T = jnp.transpose(a_exec_candidates, (1, 0, 2))  # (B, N+1, action_dim_flat)
+    
+    top_k_indices = jnp.argsort(q_candidates_T, axis=-1)[:, -K:]  # (B, K)
+    
+    # Gather elite actions: (B, K, action_dim_flat)
+    elite_actions = jnp.take_along_axis(
+        a_exec_candidates_T,
+        top_k_indices[:, :, None],
+        axis=1,
+    )  # (B, K, action_dim_flat)
+    
+    # Q values before refinement (for logging)
+    elite_q_before = jnp.take_along_axis(q_candidates_T, top_k_indices, axis=1)  # (B, K)
+    
+    # Track how often the base policy action (index N) is among elites
+    base_in_elites = (top_k_indices == N).any(axis=-1).mean()  # fraction of batch
+    
+    # ----------------------------------------------------------------
+    # Step 3: Gradient ascent on Q w.r.t. a_exec for each elite
+    # ----------------------------------------------------------------
+    # We work in a_exec space (flattened). The gradient ascent is:
+    #   a_exec <- clip(a_exec + step_size * grad_a Q(s, a_exec), -1, 1)
+    
+    def q_sum_fn(a_exec_flat, observations):
+        """Scalar Q sum for gradient computation."""
+        qs = critic.apply_fn(
+            {'params': critic.params},
+            observations, a_exec_flat
+        )
+        if critic_reduction == 'min':
+            return qs.min(axis=0).sum()
+        else:
+            return qs.mean(axis=0).sum()
+    
+    grad_q_fn = jax.grad(q_sum_fn, argnums=0)
+    
+    def refine_one_elite(a_exec_flat_BK):
+        """Run gradient ascent on a single elite action set (B, action_dim_flat)."""
+        def body_fn(_, a):
+            grad = grad_q_fn(a, batch['observations'])
+            a = a + parl_step_size * grad
+            a = jnp.clip(a, -1.0, 1.0)
+            return a
+        
+        return jax.lax.fori_loop(0, parl_num_grad_steps, body_fn, a_exec_flat_BK)
+    
+    # Reshape elites for vmap over K: (K, B, action_dim_flat)
+    elite_actions_KBD = jnp.transpose(elite_actions, (1, 0, 2))
+    
+    # Refine all K elites in parallel
+    refined_elites_KBD = jax.vmap(refine_one_elite)(elite_actions_KBD)  # (K, B, action_dim_flat)
+    
+    # ----------------------------------------------------------------
+    # Step 4: Pick the best refined action as distillation target
+    # ----------------------------------------------------------------
+    refined_q = jax.vmap(compute_q)(refined_elites_KBD)  # (K, B)
+    refined_q_T = refined_q.T  # (B, K)
+    refined_elites_BKD = jnp.transpose(refined_elites_KBD, (1, 0, 2))  # (B, K, action_dim_flat)
+    
+    best_idx = jnp.argmax(refined_q_T, axis=-1)  # (B,)
+    best_a_exec = jnp.take_along_axis(
+        refined_elites_BKD,
+        best_idx[:, None, None],
+        axis=1,
+    ).squeeze(axis=1)  # (B, action_dim_flat)
+    
+    best_q = refined_q_T[jnp.arange(B), best_idx]  # (B,)
+    
+    # Convert best a_exec back to delta (the actor's output space) for distillation
+    best_a_exec_chunked = best_a_exec.reshape(B, query_frequency, action_dim)
+    if predict_a_exec:
+        # Actor predicts a_exec directly; target IS a_exec (clipped to tanh range)
+        bc_target = jnp.clip(best_a_exec_chunked, -1.0 + 1e-6, 1.0 - 1e-6).reshape(B, action_dim_flat)
+    else:
+        # Actor predicts delta; back-derive: delta = (a_exec - base) / alpha
+        bc_target_delta = (best_a_exec_chunked - base_action[:, :query_frequency, :]) / (residual_alpha + 1e-8)
+        # Clip to actor output range (TanhNormal outputs in (-1, 1))
+        bc_target = jnp.clip(bc_target_delta, -1.0 + 1e-6, 1.0 - 1e-6).reshape(B, action_dim_flat)
+    
+    # Stop gradient on target
+    bc_target = jax.lax.stop_gradient(bc_target)
+    
+    # ----------------------------------------------------------------
+    # Step 5: Distill into actor via MSE loss
+    # ----------------------------------------------------------------
+    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, Tuple[Dict[str, float], Dict]]:
+        dist = actor.apply_fn({'params': actor_params}, batch['observations'])
+        new_model_state = {}
+        
+        # Sample-based MSE for gradient to both mean and std
+        sampled_actions = dist.sample(seed=key)  # (B, action_dim_flat)
+        mse_loss = jnp.mean((sampled_actions - bc_target) ** 2)
+        
+        # Also compute mode-based MSE for logging
+        policy_mode = dist.mode()
+        mode_mse = jnp.mean((policy_mode - bc_target) ** 2)
+        
+        # Distribution diagnostics
+        mean_dist = dist.distribution._loc
+        std_diag_dist = dist.distribution._scale_diag
+        log_std_dist = jnp.log(std_diag_dist + 1e-8)
+        
+        # Entropy (for monitoring, not in loss)
+        base_entropy = dist.distribution.entropy()
+        mean_entropy = base_entropy.mean()
+        
+        # Compute a_exec from sampled actions for diagnostics
+        sampled_chunked = sampled_actions.reshape(B, query_frequency, action_dim)
+        if predict_a_exec:
+            a_exec_diag = jnp.clip(sampled_chunked, -1.0, 1.0)
+            delta_diag = a_exec_diag - base_action[:, :query_frequency, :]
+        else:
+            delta_diag = sampled_chunked
+            a_exec_diag = jnp.clip(
+                base_action[:, :query_frequency, :] + residual_alpha * sampled_chunked,
+                -1.0, 1.0
+            )
+        
+        delta_norm = jnp.linalg.norm(delta_diag.reshape(B, -1), axis=-1)
+        base_flat = base_action[:, :query_frequency, :].reshape(B, -1)
+        base_norm = jnp.linalg.norm(base_flat, axis=-1)
+        eff_delta_norm = jnp.where(predict_a_exec, delta_norm, jnp.abs(residual_alpha) * delta_norm)
+        clipping_rate = (jnp.abs(a_exec_diag) >= 1.0).mean()
+        
+        # Target diagnostics
+        bc_target_chunked = bc_target.reshape(B, query_frequency, action_dim)
+        target_norm = jnp.linalg.norm(bc_target, axis=-1)
+        
+        info = {
+            'actor_loss': mse_loss,
+            'parl/mse_loss': mse_loss,
+            'parl/mode_mse': mode_mse,
+            'parl/q_before_refinement': elite_q_before.mean(),
+            'parl/q_after_refinement': best_q.mean(),
+            'parl/q_improvement': (best_q - elite_q_before.max(axis=-1)).mean(),
+            'parl/target_norm_mean': target_norm.mean(),
+            'parl/target_mean': bc_target.mean(),
+            'parl/target_std': jnp.std(bc_target),
+            'parl/num_samples': float(N),
+            'parl/num_elites': float(K),
+            'parl/num_grad_steps': float(parl_num_grad_steps),
+            'parl/step_size': parl_step_size,
+            'parl/base_in_elites_frac': base_in_elites,
+            'parl/base_q': q_base.mean(),
+            'entropy': mean_entropy,
+            'mean_pi_norm': jnp.linalg.norm(mean_dist, axis=-1).mean(),
+            'std_pi_norm': jnp.linalg.norm(std_diag_dist, axis=-1).mean(),
+            'mean_pi_avg': mean_dist.mean(),
+            'std_pi_avg': std_diag_dist.mean(),
+            'std_pi_min': std_diag_dist.min(),
+            'std_pi_max': std_diag_dist.max(),
+            'log_std_mean': log_std_dist.mean(),
+            'log_std_min': log_std_dist.min(),
+            'log_std_max': log_std_dist.max(),
+            'actor/delta_norm_mean': delta_norm.mean(),
+            'actor/clipping_rate': clipping_rate,
+            'actor/effective_residual_norm': eff_delta_norm.mean(),
+            'collapse/ratio_eff_delta_to_base_mean': (eff_delta_norm / (base_norm + 1e-8)).mean(),
+        }
+        
+        return mse_loss, (info, new_model_state)
+    
+    grads, (info, new_model_state) = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
+    
+    # NaN guard
+    grads = _nan_to_num_tree(grads)
+    
+    new_actor = actor.apply_gradients(grads=grads)
+    
+    return new_actor, info
+
+
 def update_actor_bc_residual(
         key: PRNGKey,
         actor: TrainState,

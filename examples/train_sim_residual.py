@@ -27,6 +27,7 @@ import jax.numpy as jnp
 from jaxrl2.agents.pixel_sac.pixel_sac_learner import PixelSACLearner
 from jaxrl2.agents.pixel_sac.pixel_sac_residual_learner import PixelSACResidualLearner
 from jaxrl2.agents.pixel_sac.pixel_ppo_residual_learner import PixelPPOResidualLearner
+from jaxrl2.agents.pixel_sac.pixel_parl_residual_learner import PixelPARLResidualLearner
 from jaxrl2.utils.general_utils import add_batch_dim
 import numpy as np
 
@@ -329,6 +330,26 @@ def main_residual(variant):
         ppo_kwargs['learn_std'] = variant.get('learn_std', True)
         agent = PixelPPOResidualLearner(variant.seed, sample_obs, sample_action, **ppo_kwargs)
         print(f"Initialized Residual {algo.upper()} with alpha={variant.residual_alpha}, predict_a_exec={variant.get('predict_a_exec', False)}")
+    elif algo == 'residual_parl':
+        # PARL: Policy-Agnostic RL (Best-of-N + Grad-Q + BC distillation)
+        parl_kwargs = {k: v for k, v in kwargs.items() if k not in ['temp_lr', 'init_temperature', 'backup_entropy', 'clip_temp', 'clip_min_temp', 'clip_max_temp', 'target_entropy']}
+        parl_kwargs['parl_num_samples'] = variant.get('parl_num_samples', 16)
+        parl_kwargs['parl_num_elites'] = variant.get('parl_num_elites', 4)
+        parl_kwargs['parl_num_grad_steps'] = variant.get('parl_num_grad_steps', 5)
+        parl_kwargs['parl_step_size'] = variant.get('parl_step_size', 0.01)
+        parl_kwargs['max_grad_norm'] = variant.get('max_grad_norm', 1.0)
+        parl_kwargs['use_huber_loss'] = variant.get('use_huber_loss', False)
+        parl_kwargs['huber_delta'] = variant.get('huber_delta', 1.0)
+        parl_kwargs['num_critic_updates'] = variant.get('num_critic_updates', 2)
+        parl_kwargs['num_actor_updates'] = variant.get('num_actor_updates', 4)
+        parl_kwargs['predict_a_exec'] = variant.get('predict_a_exec', False)
+        parl_kwargs['log_std_min'] = variant.get('log_std_min', -5.0)
+        parl_kwargs['log_std_max'] = variant.get('log_std_max', 2.0)
+        parl_kwargs['learn_std'] = variant.get('learn_std', True)
+        agent = PixelPARLResidualLearner(variant.seed, sample_obs, sample_action, **parl_kwargs)
+        print(f"Initialized Residual PARL with alpha={variant.residual_alpha}, "
+              f"N={parl_kwargs['parl_num_samples']}, K={parl_kwargs['parl_num_elites']}, "
+              f"grad_steps={parl_kwargs['parl_num_grad_steps']}, step_size={parl_kwargs['parl_step_size']}")
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
 

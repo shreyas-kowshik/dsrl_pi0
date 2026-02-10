@@ -50,8 +50,8 @@ if __name__ == '__main__':
     parser.add_argument('--predict_a_exec', default=0, help='Actor predicts a_exec directly instead of delta (1=yes, 0=no)', type=int)
     parser.add_argument('--learn_std', default=1, help='Whether the policy learns a state-dependent std (1=yes, 0=no)', type=int)
     
-    # Algorithm selection: 'sac', 'residual_sac', 'q_weighted_pg', 'residual_grpo'
-    parser.add_argument('--algo', default='residual_sac', help='Algorithm: sac, residual_sac, q_weighted_pg, residual_grpo', type=str)
+    # Algorithm selection: 'sac', 'residual_sac', 'q_weighted_pg', 'residual_grpo', 'residual_parl'
+    parser.add_argument('--algo', default='residual_sac', help='Algorithm: sac, residual_sac, q_weighted_pg, residual_grpo, residual_parl', type=str)
     
     # PPO/GRPO specific parameters (adv_clip_min/max for clipping advantages)
     parser.add_argument('--actor_tau', default=0.005, help='[DEPRECATED] Target actor soft update rate (not used anymore)', type=float)
@@ -82,6 +82,12 @@ if __name__ == '__main__':
     # Success buffer parameters
     parser.add_argument('--success_buffer_ratio', default=0.0, help='Fraction of actor batch from success buffer (0 = disabled, e.g. 0.2 for 20%%)', type=float)
     parser.add_argument('--success_buffer_min_size', default=100, help='Min samples in success buffer before using it', type=int)
+    
+    # PARL (Policy-Agnostic RL) parameters
+    parser.add_argument('--parl_num_samples', default=16, help='N: number of action candidates sampled from actor', type=int)
+    parser.add_argument('--parl_num_elites', default=4, help='K: number of top-Q actions kept for gradient refinement', type=int)
+    parser.add_argument('--parl_num_grad_steps', default=5, help='Number of gradient ascent steps on Q w.r.t. action', type=int)
+    parser.add_argument('--parl_step_size', default=0.01, help='Step size (learning rate) for gradient ascent on actions', type=float)
 
     # On-policy PPO parameters
     parser.add_argument('--on_policy_ppo', default=0, help='Use on-policy PPO with stored log_probs (1=yes, 0=no)', type=int)
