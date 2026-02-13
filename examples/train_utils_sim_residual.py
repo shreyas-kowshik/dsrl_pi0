@@ -246,7 +246,7 @@ def trajwise_alternating_training_loop_residual(
             if len(online_replay_buffer) > variant.start_online_updates:
                 # Perform first visualization before updating
                 if i == 0:
-                    print('Performing evaluation for initial checkpoint (residual PPO)')
+                    print('Performing evaluation for initial checkpoint...')
                     if perform_control_evals:
                         perform_control_eval_residual(agent, eval_env, i, variant, wandb_logger, agent_dp)
                     if hasattr(agent, 'perform_eval'):
@@ -441,6 +441,7 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
     chunk_len = variant.chunk_len  # e.g., 10 for Pi-0.5
     on_policy_ppo = variant.get('on_policy_ppo', False)
     predict_a_exec = variant.get('predict_a_exec', False)
+    use_vlm_embedding = variant.get('use_vlm_embedding', False)
     
     # Flag to control initial exploration behavior
     use_zero_residual_initially = variant.get('use_zero_residual_initially', True)
@@ -475,10 +476,26 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
             
             # 1. Query frozen Pi-0.5 (uses internal random noise)
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
-            base_actions = agent_dp.infer(obs_pi_zero)["actions"][:chunk_len]  # (chunk_len, action_dim)
+            infer_result = agent_dp.infer(obs_pi_zero, return_vlm_embedding=use_vlm_embedding)
+            base_actions = infer_result["actions"][:chunk_len]  # (chunk_len, action_dim)
             
             # 2. Build SAC observation with base_action
-            if variant.add_states:
+            if use_vlm_embedding:
+                # Use VLM embedding instead of pixels
+                vlm_hidden_state = infer_result["vlm_embedding"][0]  # first element of (hidden_state, kv_cache)
+                # vlm_hidden_state is (1, S, W) or (S, W) — ensure no batch dim
+                if vlm_hidden_state.ndim == 3 and vlm_hidden_state.shape[0] == 1:
+                    vlm_hidden_state = vlm_hidden_state[0]  # (S, W)
+                # Mean-pool over sequence tokens → (W,)
+                vlm_hidden_state = np.mean(vlm_hidden_state, axis=0)  # (W,)
+                obs_dict = {
+                    'pixels': curr_image[np.newaxis, ..., np.newaxis],
+                    'vlm_embedding': vlm_hidden_state[np.newaxis, ..., np.newaxis],  # (1, W, 1)
+                    'base_action': base_actions[np.newaxis, ..., np.newaxis],
+                }
+                if variant.add_states:
+                    obs_dict['state'] = qpos[np.newaxis, ..., np.newaxis]
+            elif variant.add_states:
                 obs_dict = {
                     'pixels': curr_image[np.newaxis, ..., np.newaxis],
                     'state': qpos[np.newaxis, ..., np.newaxis],
@@ -592,11 +609,28 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
     
     # For last obs, we need a base_action - use the last one (will be masked)
     last_base_action = base_action_list[-1] if base_action_list else np.zeros((chunk_len, variant.action_dim))
-    obs_dict = {
-        'pixels': curr_image[np.newaxis, ..., np.newaxis],
-        'state': qpos[np.newaxis, ..., np.newaxis],
-        'base_action': last_base_action[np.newaxis, ..., np.newaxis],
-    }
+    if use_vlm_embedding:
+        # Re-query VLM for last obs (or reuse last embedding)
+        obs_pi_zero = obs_to_pi_zero_input(obs, variant)
+        last_infer = agent_dp.infer(obs_pi_zero, return_vlm_embedding=True)
+        vlm_hidden_state = last_infer["vlm_embedding"][0]
+        if vlm_hidden_state.ndim == 3 and vlm_hidden_state.shape[0] == 1:
+            vlm_hidden_state = vlm_hidden_state[0]
+        # Mean-pool over sequence tokens → (W,)
+        vlm_hidden_state = np.mean(vlm_hidden_state, axis=0)  # (W,)
+        obs_dict = {
+            'pixels': curr_image[np.newaxis, ..., np.newaxis],
+            'vlm_embedding': vlm_hidden_state[np.newaxis, ..., np.newaxis],  # (1, W, 1)
+            'base_action': last_base_action[np.newaxis, ..., np.newaxis],
+        }
+        if variant.add_states:
+            obs_dict['state'] = qpos[np.newaxis, ..., np.newaxis]
+    else:
+        obs_dict = {
+            'pixels': curr_image[np.newaxis, ..., np.newaxis],
+            'state': qpos[np.newaxis, ..., np.newaxis],
+            'base_action': last_base_action[np.newaxis, ..., np.newaxis],
+        }
     if not variant.add_states:
         obs_dict.pop('state', None)
     obs_list.append(obs_dict)
@@ -656,6 +690,7 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
     residual_alpha =  float(agent._residual_alpha)
     chunk_len = variant.chunk_len
     predict_a_exec = variant.get('predict_a_exec', False)
+    use_vlm_embedding = variant.get('use_vlm_embedding', False)
     
     episode_returns = []
     highest_rewards = []
@@ -690,10 +725,24 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
                 
                 # 1. Query frozen Pi-0.5
                 obs_pi_zero = obs_to_pi_zero_input(obs, variant)
-                base_actions = agent_dp.infer(obs_pi_zero)["actions"][:chunk_len]
+                infer_result = agent_dp.infer(obs_pi_zero, return_vlm_embedding=use_vlm_embedding)
+                base_actions = infer_result["actions"][:chunk_len]
                 
                 # 2. Build SAC observation
-                if variant.add_states:
+                if use_vlm_embedding:
+                    vlm_hidden_state = infer_result["vlm_embedding"][0]
+                    if vlm_hidden_state.ndim == 3 and vlm_hidden_state.shape[0] == 1:
+                        vlm_hidden_state = vlm_hidden_state[0]
+                    # Mean-pool over sequence tokens → (W,)
+                    vlm_hidden_state = np.mean(vlm_hidden_state, axis=0)  # (W,)
+                    obs_dict = {
+                        'pixels': curr_image[np.newaxis, ..., np.newaxis],
+                        'vlm_embedding': vlm_hidden_state[np.newaxis, ..., np.newaxis],  # (1, W, 1)
+                        'base_action': base_actions[np.newaxis, ..., np.newaxis],
+                    }
+                    if variant.add_states:
+                        obs_dict['state'] = qpos[np.newaxis, ..., np.newaxis]
+                elif variant.add_states:
                     obs_dict = {
                         'pixels': curr_image[np.newaxis, ..., np.newaxis],
                         'state': qpos[np.newaxis, ..., np.newaxis],

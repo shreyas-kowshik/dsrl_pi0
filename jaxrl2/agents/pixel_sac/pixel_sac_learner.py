@@ -38,44 +38,46 @@ from jaxrl2.utils.target_update import soft_target_update
 class TrainState(train_state.TrainState):
     batch_stats: Any
 
-@functools.partial(jax.jit, static_argnames=('critic_reduction', 'color_jitter',  'aug_next', 'num_cameras'))
+@functools.partial(jax.jit, static_argnames=('critic_reduction', 'color_jitter',  'aug_next', 'num_cameras', 'use_vlm_embedding'))
 def _update_jit(
     rng: PRNGKey, actor: TrainState, critic: TrainState,
     target_critic_params: Params, temp: TrainState, batch: TrainState,
     discount: float, tau: float, target_entropy: float,
     critic_reduction: str, color_jitter: bool, aug_next: bool, num_cameras: int,
+    use_vlm_embedding: bool = False,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str,float]]:
-    aug_pixels = batch['observations']['pixels']
-    aug_next_pixels = batch['next_observations']['pixels']
-    if batch['observations']['pixels'].squeeze().ndim != 2:
-        rng, key = jax.random.split(rng)
-        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
-
-        if color_jitter:
+    if not use_vlm_embedding:
+        aug_pixels = batch['observations']['pixels']
+        aug_next_pixels = batch['next_observations']['pixels']
+        if batch['observations']['pixels'].squeeze().ndim != 2:
             rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_pixels = aug_pixels.at[:,:,:,i*3:(i+1)*3].set((color_transform(key, aug_pixels[:,:,:,i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8))
-            else:
-                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+            aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
 
-    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
-    batch = batch.copy(add_or_replace={'observations': observations})
+            if color_jitter:
+                rng, key = jax.random.split(rng)
+                if num_cameras > 1:
+                    for i in range(num_cameras):
+                        aug_pixels = aug_pixels.at[:,:,:,i*3:(i+1)*3].set((color_transform(key, aug_pixels[:,:,:,i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8))
+                else:
+                    aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
 
-    key, rng = jax.random.split(rng)
-    if aug_next:
-        rng, key = jax.random.split(rng)
-        aug_next_pixels = batched_random_crop(key, batch['next_observations']['pixels'])
-        if color_jitter:
+        observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
+        batch = batch.copy(add_or_replace={'observations': observations})
+
+        key, rng = jax.random.split(rng)
+        if aug_next:
             rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_next_pixels = aug_next_pixels.at[:,:,:,i*3:(i+1)*3].set((color_transform(key, aug_next_pixels[:,:,:,i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8))
-            else:
-                aug_next_pixels = (color_transform(key, aug_next_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-        next_observations = batch['next_observations'].copy(
-            add_or_replace={'pixels': aug_next_pixels})
-        batch = batch.copy(add_or_replace={'next_observations': next_observations})
+            aug_next_pixels = batched_random_crop(key, batch['next_observations']['pixels'])
+            if color_jitter:
+                rng, key = jax.random.split(rng)
+                if num_cameras > 1:
+                    for i in range(num_cameras):
+                        aug_next_pixels = aug_next_pixels.at[:,:,:,i*3:(i+1)*3].set((color_transform(key, aug_next_pixels[:,:,:,i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8))
+                else:
+                    aug_next_pixels = (color_transform(key, aug_next_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+            next_observations = batch['next_observations'].copy(
+                add_or_replace={'pixels': aug_next_pixels})
+            batch = batch.copy(add_or_replace={'next_observations': next_observations})
     
     key, rng = jax.random.split(rng)
     target_critic = critic.replace(params=target_critic_params)
@@ -126,6 +128,7 @@ class PixelSACLearner(Agent):
                  num_cameras: int = 1,
                  learn_std: bool = True,
                  fixed_log_std: float = -0.5,
+                 use_vlm_embedding: bool = False,
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -134,6 +137,7 @@ class PixelSACLearner(Agent):
         self.aug_next=aug_next
         self.color_jitter = color_jitter
         self.num_cameras = num_cameras
+        self.use_vlm_embedding = use_vlm_embedding
 
         self.action_dim = np.prod(actions.shape[-2:])
         self.action_chunk_shape = actions.shape[-2:]
@@ -193,7 +197,8 @@ class PixelSACLearner(Agent):
         actor_def = PixelMultiplexer(encoder=encoder_def,
                                      network=policy_def,
                                      latent_dim=latent_dim,
-                                     use_bottleneck=use_bottleneck
+                                     use_bottleneck=use_bottleneck,
+                                     use_vlm_embedding=use_vlm_embedding,
                                      )
         print(actor_def)
         actor_def_init = actor_def.init(actor_key, observations)
@@ -209,7 +214,8 @@ class PixelSACLearner(Agent):
         critic_def = PixelMultiplexer(encoder=encoder_def,
                                       network=critic_def,
                                       latent_dim=latent_dim,
-                                      use_bottleneck=use_bottleneck
+                                      use_bottleneck=use_bottleneck,
+                                      use_vlm_embedding=use_vlm_embedding,
                                       )
         print(critic_def)
         critic_def_init = critic_def.init(critic_key, observations, actions)
@@ -242,12 +248,13 @@ class PixelSACLearner(Agent):
         else:
             self.target_entropy = float(target_entropy)
         print(f'target_entropy: {self.target_entropy}')
+        print(f'use_vlm_embedding: {self.use_vlm_embedding}')
         print(self.critic_reduction)
         
 
     def update(self, batch: FrozenDict) -> Dict[str, float]:
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(
-            self._rng, self._actor, self._critic, self._target_critic_params, self._temp, batch, self.discount, self.tau, self.target_entropy, self.critic_reduction, self.color_jitter, self.aug_next, self.num_cameras
+            self._rng, self._actor, self._critic, self._target_critic_params, self._temp, batch, self.discount, self.tau, self.target_entropy, self.critic_reduction, self.color_jitter, self.aug_next, self.num_cameras, self.use_vlm_embedding
             )
 
         self._rng = new_rng
@@ -276,17 +283,13 @@ class PixelSACLearner(Agent):
 
             for t in range(0, len(actions)):
                 action = actions[t][None]
-                obs_pixels = observations['pixels'][t]
-                next_obs_pixels = next_observations['pixels'][t]
 
-                obs_dict = {'pixels': obs_pixels[None]}
+                obs_dict = {}
                 for k, v in observations.items():
-                    if 'pixels' not in k:
-                        obs_dict[k] = v[t][None]
-                next_obs_dict = {'pixels': next_obs_pixels[None]}
+                    obs_dict[k] = v[t][None]
+                next_obs_dict = {}
                 for k, v in next_observations.items():
-                    if 'pixels' not in k:
-                        next_obs_dict[k] = v[t][None]
+                    next_obs_dict[k] = v[t][None]
 
                 q_value = get_value(action, obs_dict, self._critic)
                 q_pred.append(q_value)

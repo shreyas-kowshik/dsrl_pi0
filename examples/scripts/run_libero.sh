@@ -36,7 +36,7 @@ pip install mujoco==3.3.1
 python -m examples.launch_train_sim \
 --algorithm pixel_sac \
 --env libero \
---prefix dsrl_pi05_libero_finetuned_put-both-moka-pots-on-stove-clean-new-ckpt-corrected \
+--prefix dsrl_pi05_libero_finetuned_put-both-moka-pots-on-stove-clean-new-ckpt-vlm-state \
 --wandb_project ${proj_name} \
 --batch_size 256 \
 --discount 0.999 \
@@ -54,3 +54,4 @@ python -m examples.launch_train_sim \
 --hidden_dims 128 \
 --pi_05_config pi05_libero_finetuned_two_moka_pots \
 --pi_05_ckpt_dir  /data/hf_cache/models/pi05_libero_ep5_mokapots_4k/ \
+--use_vlm_embedding 1 \

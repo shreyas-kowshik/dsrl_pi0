@@ -63,9 +63,17 @@ class DummyEnv(gym.ObservationWrapper):
 
     def __init__(self, variant):
         self.variant = variant
-        self.image_shape = (variant.resize_image, variant.resize_image, 3 * variant.num_cameras, 1)
+        use_vlm_embedding = variant.get('use_vlm_embedding', False)
         obs_dict = {}
+        self.image_shape = (variant.resize_image, variant.resize_image, 3 * variant.num_cameras, 1)
         obs_dict['pixels'] = Box(low=0, high=255, shape=self.image_shape, dtype=np.uint8)
+        if use_vlm_embedding:
+            vlm_embedding_dim = variant.get('vlm_embedding_dim', 2048)
+            obs_dict['vlm_embedding'] = Box(
+                low=-np.inf, high=np.inf,
+                shape=(vlm_embedding_dim, 1),
+                dtype=np.float32,
+            )
         if variant.add_states:
             if variant.env == 'libero':
                 state_dim = 8
@@ -155,6 +163,7 @@ def main(variant):
         raise NotImplementedError()
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi0 policy from %s", checkpoint_dir)
+    kwargs['use_vlm_embedding'] = variant.get('use_vlm_embedding', False)
     agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs)
 
     online_buffer_size = variant.max_steps  // variant.multi_grad_step

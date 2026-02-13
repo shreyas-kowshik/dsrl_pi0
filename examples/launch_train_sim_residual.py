@@ -102,6 +102,11 @@ if __name__ == '__main__':
     parser.add_argument('--bc_warmup_num_critic_updates', default=10, help='Critic updates per grad step during BC warmup (aggressive)', type=int)
     parser.add_argument('--bc_warmup_num_actor_updates', default=1, help='Actor BC updates per grad step during BC warmup (light)', type=int)
 
+    # VLM embedding parameters
+    parser.add_argument('--use_vlm_embedding', default=0, help='Use VLM embeddings instead of raw pixels (1=yes, 0=no)', type=int)
+    parser.add_argument('--vlm_embedding_dim', default=2048, help='Hidden dim of VLM embedding (W in [B,S,W])', type=int)
+    parser.add_argument('--vlm_seq_len', default=16, help='Sequence length of VLM embedding (S in [B,S,W])', type=int)
+
     # Default training kwargs
     train_args_dict = dict(
         actor_lr=1e-4,
@@ -146,6 +151,7 @@ if __name__ == '__main__':
     variant['on_policy_ppo'] = bool(variant.get('on_policy_ppo', 0))
     variant['normalize_advantages'] = bool(variant.get('normalize_advantages', 0))
     variant['learn_std'] = bool(variant.get('learn_std', 1))
+    variant['use_vlm_embedding'] = bool(variant.get('use_vlm_embedding', 0))
     
     algo = variant.get('algo', 'residual_sac')
     print("=" * 60)
@@ -190,6 +196,10 @@ if __name__ == '__main__':
     print(f"  bc_warmup_steps: {variant.get('bc_warmup_steps', 0)}")
     print(f"  bc_warmup_num_critic_updates: {variant.get('bc_warmup_num_critic_updates', 10)}")
     print(f"  bc_warmup_num_actor_updates: {variant.get('bc_warmup_num_actor_updates', 1)}")
+    print("  --- VLM Embedding ---")
+    print(f"  use_vlm_embedding: {variant.get('use_vlm_embedding', False)}")
+    print(f"  vlm_embedding_dim: {variant.get('vlm_embedding_dim', 2048)}")
+    print(f"  vlm_seq_len: {variant.get('vlm_seq_len', 16)}")
     print("=" * 60)
     print(variant)
     

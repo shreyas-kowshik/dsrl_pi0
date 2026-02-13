@@ -55,6 +55,7 @@ class TrainState(train_state.TrainState):
     static_argnames=(
         'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
         'backup_entropy', 'query_frequency', 'use_huber_loss', 'predict_a_exec',
+        'use_vlm_embedding',
     ),
 )
 def _update_critic_jit(
@@ -76,43 +77,45 @@ def _update_critic_jit(
     use_huber_loss: bool = False,
     huber_delta: float = 1.0,
     predict_a_exec: bool = False,
+    use_vlm_embedding: bool = False,
 ) -> Tuple[PRNGKey, TrainState, Params, Dict[str, float]]:
     """JIT-compiled critic update for Residual SAC."""
-    aug_pixels = batch['observations']['pixels']
-    aug_next_pixels = batch['next_observations']['pixels']
+    if not use_vlm_embedding:
+        aug_pixels = batch['observations']['pixels']
+        aug_next_pixels = batch['next_observations']['pixels']
 
-    if batch['observations']['pixels'].squeeze().ndim != 2:
-        rng, key = jax.random.split(rng)
-        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
-
-        if color_jitter:
+        if batch['observations']['pixels'].squeeze().ndim != 2:
             rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
-                        (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-                    )
-            else:
-                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+            aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
 
-    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
-    batch = batch.copy(add_or_replace={'observations': observations})
+            if color_jitter:
+                rng, key = jax.random.split(rng)
+                if num_cameras > 1:
+                    for i in range(num_cameras):
+                        aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
+                            (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                        )
+                else:
+                    aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
 
-    key, rng = jax.random.split(rng)
-    if aug_next:
-        rng, key = jax.random.split(rng)
-        aug_next_pixels = batched_random_crop(key, batch['next_observations']['pixels'])
-        if color_jitter:
+        observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
+        batch = batch.copy(add_or_replace={'observations': observations})
+
+        key, rng = jax.random.split(rng)
+        if aug_next:
             rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_next_pixels = aug_next_pixels.at[:, :, :, i*3:(i+1)*3].set(
-                        (color_transform(key, aug_next_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-                    )
-            else:
-                aug_next_pixels = (color_transform(key, aug_next_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-        next_observations = batch['next_observations'].copy(add_or_replace={'pixels': aug_next_pixels})
-        batch = batch.copy(add_or_replace={'next_observations': next_observations})
+            aug_next_pixels = batched_random_crop(key, batch['next_observations']['pixels'])
+            if color_jitter:
+                rng, key = jax.random.split(rng)
+                if num_cameras > 1:
+                    for i in range(num_cameras):
+                        aug_next_pixels = aug_next_pixels.at[:, :, :, i*3:(i+1)*3].set(
+                            (color_transform(key, aug_next_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                        )
+                else:
+                    aug_next_pixels = (color_transform(key, aug_next_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+            next_observations = batch['next_observations'].copy(add_or_replace={'pixels': aug_next_pixels})
+            batch = batch.copy(add_or_replace={'next_observations': next_observations})
 
     key, rng = jax.random.split(rng)
     target_critic = critic.replace(params=target_critic_params)
@@ -141,7 +144,7 @@ def _update_critic_jit(
     jax.jit,
     static_argnames=(
         'critic_reduction', 'color_jitter', 'num_cameras', 'query_frequency',
-        'bc_on_success_only', 'bc_flag', 'predict_a_exec',
+        'bc_on_success_only', 'bc_flag', 'predict_a_exec', 'use_vlm_embedding',
     ),
 )
 def _update_actor_jit(
@@ -160,26 +163,28 @@ def _update_actor_jit(
     bc_reg_coeff: float,
     bc_on_success_only: bool,
     predict_a_exec: bool = False,
+    use_vlm_embedding: bool = False,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Dict[str, float]]:
     """JIT-compiled actor + temperature update for Residual SAC."""
-    aug_pixels = batch['observations']['pixels']
+    if not use_vlm_embedding:
+        aug_pixels = batch['observations']['pixels']
 
-    if batch['observations']['pixels'].squeeze().ndim != 2:
-        rng, key = jax.random.split(rng)
-        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
-
-        if color_jitter:
+        if batch['observations']['pixels'].squeeze().ndim != 2:
             rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
-                        (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-                    )
-            else:
-                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+            aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
 
-    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
-    batch = batch.copy(add_or_replace={'observations': observations})
+            if color_jitter:
+                rng, key = jax.random.split(rng)
+                if num_cameras > 1:
+                    for i in range(num_cameras):
+                        aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
+                            (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                        )
+                else:
+                    aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+
+        observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
+        batch = batch.copy(add_or_replace={'observations': observations})
 
     key, rng = jax.random.split(rng)
     new_actor, actor_info = update_actor_residual(
@@ -206,6 +211,7 @@ def _update_actor_jit(
     jax.jit,
     static_argnames=(
         'color_jitter', 'num_cameras', 'query_frequency', 'predict_a_exec',
+        'use_vlm_embedding',
     ),
 )
 def _update_actor_bc_jit(
@@ -216,26 +222,28 @@ def _update_actor_bc_jit(
     num_cameras: int,
     query_frequency: int,
     predict_a_exec: bool = False,
+    use_vlm_embedding: bool = False,
 ) -> Tuple[PRNGKey, TrainState, Dict[str, float]]:
     """JIT-compiled BC warmup actor update for SAC."""
-    aug_pixels = batch['observations']['pixels']
+    if not use_vlm_embedding:
+        aug_pixels = batch['observations']['pixels']
 
-    if batch['observations']['pixels'].squeeze().ndim != 2:
-        rng, key = jax.random.split(rng)
-        aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
-
-        if color_jitter:
+        if batch['observations']['pixels'].squeeze().ndim != 2:
             rng, key = jax.random.split(rng)
-            if num_cameras > 1:
-                for i in range(num_cameras):
-                    aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
-                        (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
-                    )
-            else:
-                aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+            aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
 
-    observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
-    batch = batch.copy(add_or_replace={'observations': observations})
+            if color_jitter:
+                rng, key = jax.random.split(rng)
+                if num_cameras > 1:
+                    for i in range(num_cameras):
+                        aug_pixels = aug_pixels.at[:, :, :, i*3:(i+1)*3].set(
+                            (color_transform(key, aug_pixels[:, :, :, i*3:(i+1)*3].astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+                        )
+                else:
+                    aug_pixels = (color_transform(key, aug_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
+
+        observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
+        batch = batch.copy(add_or_replace={'observations': observations})
 
     key, rng = jax.random.split(rng)
     new_actor, actor_info = update_actor_bc_residual(
@@ -296,6 +304,7 @@ class PixelSACResidualLearner(Agent):
                  bc_reg_coeff: float = 0.0,
                  bc_on_success_only: bool = False,
                  predict_a_exec: bool = False,
+                 use_vlm_embedding: bool = False,
                  log_std_min: float = -5.0,
                  log_std_max: float = 2.0,
                  learn_std: bool = True,
@@ -366,6 +375,7 @@ class PixelSACResidualLearner(Agent):
         self.bc_reg_coeff = bc_reg_coeff
         self.bc_on_success_only = bc_on_success_only
         self.predict_a_exec = predict_a_exec
+        self.use_vlm_embedding = use_vlm_embedding
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
@@ -424,7 +434,8 @@ class PixelSACResidualLearner(Agent):
             network=policy_def,
             latent_dim=latent_dim,
             use_bottleneck=use_bottleneck,
-            pop_base_actions=False
+            pop_base_actions=False,
+            use_vlm_embedding=use_vlm_embedding,
         )
         print(f"Residual SAC Actor: {actor_def}")
         actor_def_init = actor_def.init(actor_key, observations)
@@ -451,7 +462,8 @@ class PixelSACResidualLearner(Agent):
             network=critic_def,
             latent_dim=latent_dim,
             use_bottleneck=use_bottleneck,
-            pop_base_actions=critic_pop_base_actions # TODO Make this a parameter? Add to Variant?
+            pop_base_actions=critic_pop_base_actions,
+            use_vlm_embedding=use_vlm_embedding,
         )
         print(f"Residual SAC Critic: {critic_def}")
         
@@ -510,6 +522,7 @@ class PixelSACResidualLearner(Agent):
         print(f'  bc_reg_coeff: {self.bc_reg_coeff}')
         print(f'  bc_on_success_only: {self.bc_on_success_only}')
         print(f'  predict_a_exec: {self.predict_a_exec}')
+        print(f'  use_vlm_embedding: {self.use_vlm_embedding}')
         print(f'  log_std_min: {log_std_min}')
         print(f'  log_std_max: {log_std_max}')
 
@@ -541,6 +554,7 @@ class PixelSACResidualLearner(Agent):
             self.use_huber_loss,
             self.huber_delta,
             self.predict_a_exec,
+            self.use_vlm_embedding,
         )
         self._rng = new_rng
         self._critic = new_critic
@@ -572,6 +586,7 @@ class PixelSACResidualLearner(Agent):
             self.bc_reg_coeff,
             self.bc_on_success_only,
             self.predict_a_exec,
+            self.use_vlm_embedding,
         )
         self._rng = new_rng
         self._actor = new_actor
@@ -598,6 +613,7 @@ class PixelSACResidualLearner(Agent):
             self.num_cameras,
             self.query_frequency,
             self.predict_a_exec,
+            self.use_vlm_embedding,
         )
         self._rng = new_rng
         self._actor = new_actor
@@ -645,16 +661,14 @@ class PixelSACResidualLearner(Agent):
 
             for t in range(0, len(actions)):
                 action = actions[t][None]  # (1, query_frequency, action_dim)
-                obs_pixels = observations['pixels'][t]
-                base_action = observations['base_action'][t]  # (chunk_len, action_dim, 1)
-
-                obs_dict = {'pixels': obs_pixels[None], 'base_action': base_action[None]}
+                
+                obs_dict = {}
                 for k, v in observations.items():
-                    if k not in ['pixels', 'base_action']:
-                        obs_dict[k] = v[t][None]
+                    obs_dict[k] = v[t][None]
 
                 # Compose executed action for Q evaluation
-                base_action_squeezed = base_action.squeeze(-1)  # (chunk_len, action_dim)
+                base_action_raw = observations['base_action'][t]
+                base_action_squeezed = base_action_raw.squeeze(-1)  # (chunk_len, action_dim)
                 if self.predict_a_exec:
                     # Stored actions ARE a_exec
                     a_exec = np.clip(action.squeeze(0), -1.0, 1.0)

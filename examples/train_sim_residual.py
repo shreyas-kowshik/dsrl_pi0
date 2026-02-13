@@ -86,6 +86,7 @@ class DummyEnvResidual(gym.ObservationWrapper):
     def __init__(self, variant):
         self.variant = variant
         self.image_shape = (variant.resize_image, variant.resize_image, 3 * variant.num_cameras, 1)
+        self.use_vlm_embedding = variant.get('use_vlm_embedding', False)
         
         # Determine dimensions based on environment
         if variant.env == 'libero':
@@ -103,7 +104,15 @@ class DummyEnvResidual(gym.ObservationWrapper):
         chunk_len = variant.chunk_len  # e.g., 10 for Pi-0.5
         query_freq = variant.query_freq  # e.g., 5 or 10
         obs_dict = {}
+        
         obs_dict['pixels'] = Box(low=0, high=255, shape=self.image_shape, dtype=np.uint8)
+        if self.use_vlm_embedding:
+            vlm_embedding_dim = variant.get('vlm_embedding_dim', 2048)
+            obs_dict['vlm_embedding'] = Box(
+                low=-np.inf, high=np.inf,
+                shape=(vlm_embedding_dim, 1),
+                dtype=np.float32
+            )
         
         if variant.add_states:
             obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
@@ -229,6 +238,8 @@ def main_residual(variant):
         agent_dp = ZeroBasePolicy(
             action_dim=variant.action_dim,
             chunk_len=variant.chunk_len,
+            vlm_embedding_dim=variant.get('vlm_embedding_dim', 2048),
+            vlm_seq_len=variant.get('vlm_seq_len', 16),
         )
         print(f"Using ZeroBasePolicy for CartPole (action_dim={variant.action_dim}, chunk_len={variant.chunk_len})")
     else:
@@ -297,6 +308,7 @@ def main_residual(variant):
         kwargs['log_std_max'] = variant.get('log_std_max', 2.0)
         kwargs['learn_std'] = variant.get('learn_std', True)
         kwargs['predict_a_exec'] = variant.get('predict_a_exec', False)
+        kwargs['use_vlm_embedding'] = variant.get('use_vlm_embedding', False)
         agent = PixelSACResidualLearner(variant.seed, sample_obs, sample_action, **kwargs)
         print(f"Initialized Residual SAC with alpha={variant.residual_alpha}, predict_a_exec={variant.get('predict_a_exec', False)}")
     elif algo in ['q_weighted_pg', 'residual_grpo']:
@@ -328,6 +340,7 @@ def main_residual(variant):
         ppo_kwargs['log_std_max'] = variant.get('log_std_max', 2.0)
         ppo_kwargs['predict_a_exec'] = variant.get('predict_a_exec', False)
         ppo_kwargs['learn_std'] = variant.get('learn_std', True)
+        ppo_kwargs['use_vlm_embedding'] = variant.get('use_vlm_embedding', False)
         agent = PixelPPOResidualLearner(variant.seed, sample_obs, sample_action, **ppo_kwargs)
         print(f"Initialized Residual {algo.upper()} with alpha={variant.residual_alpha}, predict_a_exec={variant.get('predict_a_exec', False)}")
     elif algo == 'residual_parl':
@@ -346,6 +359,7 @@ def main_residual(variant):
         parl_kwargs['log_std_min'] = variant.get('log_std_min', -5.0)
         parl_kwargs['log_std_max'] = variant.get('log_std_max', 2.0)
         parl_kwargs['learn_std'] = variant.get('learn_std', True)
+        parl_kwargs['use_vlm_embedding'] = variant.get('use_vlm_embedding', False)
         agent = PixelPARLResidualLearner(variant.seed, sample_obs, sample_action, **parl_kwargs)
         print(f"Initialized Residual PARL with alpha={variant.residual_alpha}, "
               f"N={parl_kwargs['parl_num_samples']}, K={parl_kwargs['parl_num_elites']}, "

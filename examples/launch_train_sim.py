@@ -27,6 +27,11 @@ if __name__ == '__main__':
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
     parser.add_argument('--pi_05_config', default='', help='config name for pi05 model', type=str)
     parser.add_argument('--pi_05_ckpt_dir', default='', help='checkpoint dir for pi05 model', type=str)
+    
+    # VLM embedding flags
+    parser.add_argument('--use_vlm_embedding', default=0, help='Use VLM embeddings instead of pixels (0 or 1)', type=int)
+    parser.add_argument('--vlm_embedding_dim', default=2048, help='VLM embedding hidden dimension', type=int)
+    parser.add_argument('--vlm_seq_len', default=16, help='VLM embedding sequence length', type=int)
 
     train_args_dict = dict(
         actor_lr=1e-4,
@@ -54,7 +59,17 @@ if __name__ == '__main__':
         )
 
     variant, args = parse_training_args(train_args_dict, parser)
+    variant['use_vlm_embedding'] = bool(variant.get('use_vlm_embedding', 0))
     print(variant)
+    
+    # Print VLM embedding config
+    print(f'\n=== VLM Embedding Config ===')
+    print(f'  use_vlm_embedding: {variant.use_vlm_embedding}')
+    if variant.use_vlm_embedding:
+        print(f'  vlm_embedding_dim: {variant.vlm_embedding_dim}')
+        print(f'  vlm_seq_len: {variant.vlm_seq_len}')
+    print()
+    
     main(variant)
     sys.exit()
     

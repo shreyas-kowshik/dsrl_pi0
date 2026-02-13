@@ -194,6 +194,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
     query_frequency = variant.query_freq
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
+    use_vlm_embedding = variant.get('use_vlm_embedding', False)
 
     agent._rng, rng = jax.random.split(agent._rng)
     
@@ -212,7 +213,10 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
         
         qpos = obs_to_qpos(obs, variant)
 
-        if variant.add_states:
+        if use_vlm_embedding:
+            # VLM embedding will be filled in at query time below
+            pass
+        elif variant.add_states:
             obs_dict = {
                 'pixels': curr_image[np.newaxis, ..., np.newaxis],
                 'state': qpos[np.newaxis, ..., np.newaxis],
@@ -228,6 +232,22 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
             # we then use the noise to sample the action from diffusion model
             rng, key = jax.random.split(rng)
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
+            
+            # When using VLM embedding, get the prefix representation before SAC predicts noise
+            if use_vlm_embedding:
+                vlm_hidden_state = agent_dp.get_prefix_rep(obs_pi_zero)  # (hidden_state, kv_cache)
+                vlm_hidden_state = vlm_hidden_state[0] # First is the hidden state, second is the kv_cache which is not used for SAC input
+                if vlm_hidden_state.ndim == 3 and vlm_hidden_state.shape[0] == 1:
+                    vlm_hidden_state = vlm_hidden_state[0]  # (S, W)
+                # Mean-pool over sequence tokens → (W,)
+                vlm_hidden_state = np.mean(vlm_hidden_state, axis=0)  # (W,)
+                obs_dict = {
+                    'pixels': curr_image[np.newaxis, ..., np.newaxis],
+                    'vlm_embedding': vlm_hidden_state[np.newaxis, ..., np.newaxis],  # (1, W, 1)
+                }
+                if variant.add_states:
+                    obs_dict['state'] = qpos[np.newaxis, ..., np.newaxis]
+            
             if i == 0:
                 # for initial round of data collection, we sample from standard gaussian noise
                 noise = jax.random.normal(key, (1, *agent.action_chunk_shape))
@@ -242,6 +262,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
                 noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
             
             actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+            
             action_list.append(actions_noise)
             obs_list.append(obs_dict)
      
@@ -260,10 +281,28 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
     # add last observation
     curr_image = obs_to_img(obs, variant)
     qpos = obs_to_qpos(obs, variant)
-    obs_dict = {
-        'pixels': curr_image[np.newaxis, ..., np.newaxis],
-        'state': qpos[np.newaxis, ..., np.newaxis],
-    }
+    if use_vlm_embedding:
+        # Get VLM embedding for last obs
+        obs_pi_zero = obs_to_pi_zero_input(obs, variant)
+        vlm_hidden_state = agent_dp.get_prefix_rep(obs_pi_zero)  # (hidden_state, kv_cache)
+        vlm_hidden_state = vlm_hidden_state[0] # First is the hidden state, second is the kv_cache which is not used for SAC input
+        if vlm_hidden_state.ndim == 3 and vlm_hidden_state.shape[0] == 1:
+            vlm_hidden_state = vlm_hidden_state[0]
+        # Mean-pool over sequence tokens → (W,)
+        vlm_hidden_state = np.mean(vlm_hidden_state, axis=0)  # (W,)
+        obs_dict = {
+            'pixels': curr_image[np.newaxis, ..., np.newaxis],
+            'vlm_embedding': vlm_hidden_state[np.newaxis, ..., np.newaxis],  # (1, W, 1)
+        }
+        if variant.add_states:
+            obs_dict['state'] = qpos[np.newaxis, ..., np.newaxis]
+    else:
+        obs_dict = {
+            'pixels': curr_image[np.newaxis, ..., np.newaxis],
+            'state': qpos[np.newaxis, ..., np.newaxis],
+        }
+        if not variant.add_states:
+            obs_dict.pop('state', None)
     obs_list.append(obs_dict)
     image_list.append(curr_image)
     
@@ -302,6 +341,7 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
     print('query frequency', query_frequency)
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
+    use_vlm_embedding = variant.get('use_vlm_embedding', False)
     episode_returns = []
     highest_rewards = []
     success_rates = []
@@ -324,21 +364,36 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
 
             if t % query_frequency == 0:
                 qpos = obs_to_qpos(obs, variant)
-                if variant.add_states:
-                    obs_dict = {
-                        'pixels': curr_image[np.newaxis, ..., np.newaxis],
-                        'state': qpos[np.newaxis, ..., np.newaxis],
-                    }
-                else:
-                    obs_dict = {
-                        'pixels': curr_image[np.newaxis, ..., np.newaxis],
-                    }
+                if not use_vlm_embedding:
+                    if variant.add_states:
+                        obs_dict = {
+                            'pixels': curr_image[np.newaxis, ..., np.newaxis],
+                            'state': qpos[np.newaxis, ..., np.newaxis],
+                        }
+                    else:
+                        obs_dict = {
+                            'pixels': curr_image[np.newaxis, ..., np.newaxis],
+                        }
 
                 rng, key = jax.random.split(rng)
                 assert agent_dp is not None
                 
                 obs_pi_zero = obs_to_pi_zero_input(obs, variant)
                 
+                # When using VLM embedding, get prefix representation for SAC
+                if use_vlm_embedding:
+                    vlm_hidden_state = agent_dp.get_prefix_rep(obs_pi_zero)  # (hidden_state, kv_cache)
+                    vlm_hidden_state = vlm_hidden_state[0] # First is the hidden state
+                    if vlm_hidden_state.ndim == 3 and vlm_hidden_state.shape[0] == 1:
+                        vlm_hidden_state = vlm_hidden_state[0]
+                    # Mean-pool over sequence tokens → (W,)
+                    vlm_hidden_state = np.mean(vlm_hidden_state, axis=0)  # (W,)
+                    obs_dict = {
+                        'pixels': curr_image[np.newaxis, ..., np.newaxis],
+                        'vlm_embedding': vlm_hidden_state[np.newaxis, ..., np.newaxis],  # (1, W, 1)
+                    }
+                    if variant.add_states:
+                        obs_dict['state'] = qpos[np.newaxis, ..., np.newaxis]
                 
                 if i == 0:
                     # for initial evaluation, we sample from standard gaussian noise to evaluate the base policy's performance

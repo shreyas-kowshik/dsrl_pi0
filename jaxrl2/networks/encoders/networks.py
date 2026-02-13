@@ -42,6 +42,7 @@ class PixelMultiplexer(nn.Module):
     latent_dim: int
     use_bottleneck: bool=True
     pop_base_actions: bool=True
+    use_vlm_embedding: bool=False
     @nn.compact
     def __call__(self,
                  observations: Union[FrozenDict, Dict],
@@ -49,13 +50,23 @@ class PixelMultiplexer(nn.Module):
                  training: bool = False):
         observations = FrozenDict(observations)
 
-        x = self.encoder(observations['pixels'], training)
+        if self.use_vlm_embedding:
+            # VLM embedding mode: pop 'pixels' (raw images), use 'vlm_embedding' instead.
+            # observations['vlm_embedding'] has shape (B, W, 1) — already mean-pooled at collection time.
+            vlm_emb = observations['vlm_embedding']
+            x = jnp.squeeze(vlm_emb, axis=-1)  # (B, W)
+            # Drop both 'pixels' and 'vlm_embedding' from observations
+            observations = FrozenDict({k: v for k, v in observations.items() if k not in ('pixels', 'vlm_embedding')})
+        else:
+            x = self.encoder(observations['pixels'], training)
+        
         if self.use_bottleneck:
             x = nn.Dense(self.latent_dim, kernel_init=xavier_init())(x)
             x = nn.LayerNorm()(x)
             x = nn.tanh(x)
 
         x = observations.copy(add_or_replace={'pixels': x})
+        
         if 'base_action' in x and self.pop_base_actions:
            x = FrozenDict({k: v for k, v in x.items() if k != 'base_action'})
         elif 'base_action' in x:
