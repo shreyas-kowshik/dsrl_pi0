@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=residual_parl_pi0      # Job name
+#SBATCH --job-name=residual_parl_pi0       # Job name
 #SBATCH --nodes=1                          # Number of nodes
 #SBATCH --gres=gpu:1                       # GPUs per node
 #SBATCH --cpus-per-task=12                 # CPU cores per task
 #SBATCH --mem=128G                         # Memory per node
 #SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
 #SBATCH --partition=general                # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/parl_logs/logs/residual_parl_libero_pi0_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/sreyasv/parl_logs/logs/residual_parl_libero_pi0_%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/skowshik/parl_logs/logs/residual_parl_libero_pi0_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/skowshik/parl_logs/logs/residual_parl_libero_pi0_%x_%j.err    # Stderr log
 
 # =============================================================================
 # LIBERO: Residual PA-RL (Policy-Agnostic RL) with Pi-0.5
@@ -25,10 +25,10 @@
 # -------------------------------
 # Environment setup
 # -------------------------------
-source /home/sreyasv/miniconda3/etc/profile.d/conda.sh
+# source /home/skowshik/miniconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0
 
-mkdir -p /data/user_data/sreyasv/parl_logs/logs/
+mkdir -p /data/user_data/skowshik/parl_logs/logs/
 
 # -------------------------------
 # Configuration
@@ -42,7 +42,7 @@ export PYOPENGL_PLATFORM=egl
 export MUJOCO_EGL_DEVICE_ID=$device_id
 
 export OPENPI_DATA_HOME=/data/hf_cache/pi-models/openpi
-export EXP=/data/user_data/sreyasv/parl_exp/logs/$proj_name
+export EXP=/data/user_data/skowshik/parl_exp/logs/$proj_name
 export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
@@ -73,8 +73,8 @@ python -m examples.launch_train_sim_residual \
     --action_magnitude 1.0 \
     --query_freq 10 \
     --hidden_dims 512 \
-    --pi_05_config pi05_libero_finetuned_two_moka_pots \
-    --pi_05_ckpt_dir /data/hf_cache/models/pi05_libero_ep5_mokapots_4k/ \
+    --pi_05_config pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k \
+    --pi_05_ckpt_dir /data/user_data/skowshik/openpi_cache/pi05_libero_lora_vision_fullft_action_putbothmokapots_task_ep5_bs32_v2_icml/pi05_libero_lora_vision_fullft_action_putbothmokapots_task_ep5_bs32_v2_icml-v1/4000/ \
     --residual_alpha 0.5 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
