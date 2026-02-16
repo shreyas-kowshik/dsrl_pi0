@@ -1185,6 +1185,215 @@ def update_actor_residual_parl(
     return new_actor, info
 
 
+def update_actor_residual_gradq(
+        key: PRNGKey,
+        actor: TrainState,
+        critic: TrainState,
+        batch: DatasetDict,
+        residual_alpha: float,
+        query_frequency: int,
+        action_dim: int,
+        gradq_num_grad_steps: int = 5,
+        gradq_step_size: float = 0.01,
+        critic_reduction: str = 'min',
+        predict_a_exec: bool = False,
+) -> Tuple[TrainState, Dict[str, float]]:
+    """Update actor via Gradient-Q (GradQ) for residual setting.
+
+    Simplified variant of PARL that skips Best-of-N selection:
+    1. Sample 1 action from the current actor pi_theta(s)
+    2. Convert to a_exec space
+    3. Refine via gradient ascent: a <- a + eta * grad_a Q(s, a)
+    4. Use the refined action as distillation target a*
+    5. Train the actor to imitate a* via MSE loss (BC distillation)
+
+    The actor never differentiates through the critic — the critic only
+    provides stop-gradient targets.
+
+    Args:
+        key: PRNG key.
+        actor: Current actor TrainState.
+        critic: Critic TrainState (used for Q-evaluation and gradient ascent).
+        batch: Batch of transitions.
+        residual_alpha: Scaling factor for residual actions.
+        query_frequency: Chunk length for action queries.
+        action_dim: Action dimension per step.
+        gradq_num_grad_steps: Number of gradient ascent steps on Q w.r.t. action.
+        gradq_step_size: Step size (learning rate) for gradient ascent on actions.
+        critic_reduction: How to reduce Q ensemble ('min' or 'mean').
+        predict_a_exec: If True, actor predicts a_exec directly (not delta).
+
+    Returns:
+        Updated actor TrainState and info dict.
+    """
+    key, sample_key = jax.random.split(key)
+
+    # Extract base actions from observations
+    base_action_raw = batch['observations']['base_action']
+    base_action = jnp.squeeze(base_action_raw, axis=-1)  # (B, T, A)
+    B, T, A = base_action.shape
+    action_dim_flat = query_frequency * action_dim
+
+    # ----------------------------------------------------------------
+    # Step 1: Sample 1 action from current actor (frozen)
+    # ----------------------------------------------------------------
+    frozen_dist = actor.apply_fn(
+        {'params': jax.lax.stop_gradient(actor.params)},
+        batch['observations']
+    )
+
+    delta_sample = frozen_dist.sample(seed=sample_key)  # (B, action_dim_flat)
+    delta_sample = jax.lax.stop_gradient(delta_sample)
+
+    # ----------------------------------------------------------------
+    # Step 2: Convert to a_exec space
+    # ----------------------------------------------------------------
+    delta_chunked = delta_sample.reshape(B, query_frequency, action_dim)
+    if predict_a_exec:
+        a_exec_init = jnp.clip(delta_chunked, -1.0, 1.0)
+    else:
+        a_exec_init = jnp.clip(
+            base_action[:, :query_frequency, :] + residual_alpha * delta_chunked,
+            -1.0, 1.0
+        )
+    a_exec_flat = a_exec_init.reshape(B, action_dim_flat)  # (B, action_dim_flat)
+
+    def compute_q(a_exec_flat_):
+        """Evaluate critic on a_exec_flat (B, action_dim_flat) → (B,)."""
+        qs = critic.apply_fn(
+            {'params': critic.params},
+            batch['observations'], a_exec_flat_
+        )
+        if critic_reduction == 'min':
+            return qs.min(axis=0)
+        else:
+            return qs.mean(axis=0)
+
+    q_before = compute_q(a_exec_flat)  # (B,)
+
+    # ----------------------------------------------------------------
+    # Step 3: Gradient ascent on Q w.r.t. a_exec
+    # ----------------------------------------------------------------
+    def q_sum_fn(a_exec_flat_, observations):
+        """Scalar Q sum for gradient computation."""
+        qs = critic.apply_fn(
+            {'params': critic.params},
+            observations, a_exec_flat_
+        )
+        if critic_reduction == 'min':
+            return qs.min(axis=0).sum()
+        else:
+            return qs.mean(axis=0).sum()
+
+    grad_q_fn = jax.grad(q_sum_fn, argnums=0)
+
+    def body_fn(_, a):
+        grad = grad_q_fn(a, batch['observations'])
+        a = a + gradq_step_size * grad
+        a = jnp.clip(a, -1.0, 1.0)
+        return a
+
+    refined_a_exec = jax.lax.fori_loop(0, gradq_num_grad_steps, body_fn, a_exec_flat)
+
+    q_after = compute_q(refined_a_exec)  # (B,)
+
+    # ----------------------------------------------------------------
+    # Step 4: Convert refined a_exec back to actor output space as BC target
+    # ----------------------------------------------------------------
+    refined_chunked = refined_a_exec.reshape(B, query_frequency, action_dim)
+    if predict_a_exec:
+        bc_target = jnp.clip(refined_chunked, -1.0 + 1e-6, 1.0 - 1e-6).reshape(B, action_dim_flat)
+    else:
+        bc_target_delta = (refined_chunked - base_action[:, :query_frequency, :]) / (residual_alpha + 1e-8)
+        bc_target = jnp.clip(bc_target_delta, -1.0 + 1e-6, 1.0 - 1e-6).reshape(B, action_dim_flat)
+
+    bc_target = jax.lax.stop_gradient(bc_target)
+
+    # ----------------------------------------------------------------
+    # Step 5: Distill into actor via MSE loss
+    # ----------------------------------------------------------------
+    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, Tuple[Dict[str, float], Dict]]:
+        dist = actor.apply_fn({'params': actor_params}, batch['observations'])
+        new_model_state = {}
+
+        # Sample-based MSE for gradient to both mean and std
+        sampled_actions = dist.sample(seed=key)  # (B, action_dim_flat)
+        mse_loss = jnp.mean((sampled_actions - bc_target) ** 2)
+
+        # Also compute mode-based MSE for logging
+        policy_mode = dist.mode()
+        mode_mse = jnp.mean((policy_mode - bc_target) ** 2)
+
+        # Distribution diagnostics
+        mean_dist = dist.distribution._loc
+        std_diag_dist = dist.distribution._scale_diag
+        log_std_dist = jnp.log(std_diag_dist + 1e-8)
+
+        # Entropy (for monitoring, not in loss)
+        base_entropy = dist.distribution.entropy()
+        mean_entropy = base_entropy.mean()
+
+        # Compute a_exec from sampled actions for diagnostics
+        sampled_chunked = sampled_actions.reshape(B, query_frequency, action_dim)
+        if predict_a_exec:
+            a_exec_diag = jnp.clip(sampled_chunked, -1.0, 1.0)
+            delta_diag = a_exec_diag - base_action[:, :query_frequency, :]
+        else:
+            delta_diag = sampled_chunked
+            a_exec_diag = jnp.clip(
+                base_action[:, :query_frequency, :] + residual_alpha * sampled_chunked,
+                -1.0, 1.0
+            )
+
+        delta_norm = jnp.linalg.norm(delta_diag.reshape(B, -1), axis=-1)
+        base_flat = base_action[:, :query_frequency, :].reshape(B, -1)
+        base_norm = jnp.linalg.norm(base_flat, axis=-1)
+        eff_delta_norm = jnp.where(predict_a_exec, delta_norm, jnp.abs(residual_alpha) * delta_norm)
+        clipping_rate = (jnp.abs(a_exec_diag) >= 1.0).mean()
+
+        # Target diagnostics
+        target_norm = jnp.linalg.norm(bc_target, axis=-1)
+
+        info = {
+            'actor_loss': mse_loss,
+            'gradq/mse_loss': mse_loss,
+            'gradq/mode_mse': mode_mse,
+            'gradq/q_before_refinement': q_before.mean(),
+            'gradq/q_after_refinement': q_after.mean(),
+            'gradq/q_improvement': (q_after - q_before).mean(),
+            'gradq/target_norm_mean': target_norm.mean(),
+            'gradq/target_mean': bc_target.mean(),
+            'gradq/target_std': jnp.std(bc_target),
+            'gradq/num_grad_steps': float(gradq_num_grad_steps),
+            'gradq/step_size': gradq_step_size,
+            'entropy': mean_entropy,
+            'mean_pi_norm': jnp.linalg.norm(mean_dist, axis=-1).mean(),
+            'std_pi_norm': jnp.linalg.norm(std_diag_dist, axis=-1).mean(),
+            'mean_pi_avg': mean_dist.mean(),
+            'std_pi_avg': std_diag_dist.mean(),
+            'std_pi_min': std_diag_dist.min(),
+            'std_pi_max': std_diag_dist.max(),
+            'log_std_mean': log_std_dist.mean(),
+            'log_std_min': log_std_dist.min(),
+            'log_std_max': log_std_dist.max(),
+            'actor/delta_norm_mean': delta_norm.mean(),
+            'actor/clipping_rate': clipping_rate,
+            'actor/effective_residual_norm': eff_delta_norm.mean(),
+            'collapse/ratio_eff_delta_to_base_mean': (eff_delta_norm / (base_norm + 1e-8)).mean(),
+        }
+
+        return mse_loss, (info, new_model_state)
+
+    grads, (info, new_model_state) = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
+
+    # NaN guard
+    grads = _nan_to_num_tree(grads)
+
+    new_actor = actor.apply_gradients(grads=grads)
+
+    return new_actor, info
+
+
 def update_actor_bc_residual(
         key: PRNGKey,
         actor: TrainState,

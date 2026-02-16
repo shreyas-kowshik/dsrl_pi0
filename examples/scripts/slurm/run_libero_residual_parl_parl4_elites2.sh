@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=residual_parl_pi0       # Job name
+#SBATCH --job-name=residual_parl_pi0-parl4_2elites       # Job name
 #SBATCH --nodes=1                          # Number of nodes
 #SBATCH --gres=gpu:1                       # GPUs per node
 #SBATCH --cpus-per-task=12                 # CPU cores per task
@@ -18,14 +18,13 @@
 # residual never degrades below base policy quality.
 #
 # Usage:
-#   bash examples/scripts/run_libero_residual_parl.sh
-#   sbatch examples/scripts/run_libero_residual_parl.sh
+#   sbatch examples/scripts/slurm/run_libero_residual_parl.sh
 # =============================================================================
 
 # -------------------------------
 # Environment setup
 # -------------------------------
-# source /home/skowshik/miniconda3/etc/profile.d/conda.sh
+source /data/user_data/skowshik/anaconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0
 
 mkdir -p /data/user_data/skowshik/parl_logs/logs/
@@ -56,16 +55,16 @@ python -m examples.launch_train_sim_residual \
     --algorithm residual_parl \
     --algo residual_parl \
     --env libero \
-    --prefix residual_parl_pi05-mokaPots-4k-vlm-a-exec \
+    --prefix residual_parl_pi05-mokaPots-4k-vlm-a-exec-parl4_2elites \
     --wandb_project ${proj_name} \
     --batch_size 64 \
     --discount 0.999 \
     --seed 0 \
     --max_steps 2500000 \
-    --eval_interval 25000 \
+    --eval_interval 5000 \
     --log_interval 500 \
-    --checkpoint_interval 100000 \
-    --eval_episodes 50 \
+    --checkpoint_interval 10000 \
+    --eval_episodes 10 \
     --multi_grad_step 1 \
     --encoder_type small \
     --start_online_updates 500 \
@@ -86,8 +85,8 @@ python -m examples.launch_train_sim_residual \
     --success_buffer_ratio 0.0 \
     --success_buffer_min_size 100 \
     --predict_a_exec 1 \
-    --parl_num_samples 16 \
-    --parl_num_elites 8 \
+    --parl_num_samples 4 \
+    --parl_num_elites 2 \
     --parl_num_grad_steps 30 \
     --parl_step_size 0.001 \
     --bc_warmup_steps 10000 \

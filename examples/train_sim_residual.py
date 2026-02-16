@@ -28,6 +28,7 @@ from jaxrl2.agents.pixel_sac.pixel_sac_learner import PixelSACLearner
 from jaxrl2.agents.pixel_sac.pixel_sac_residual_learner import PixelSACResidualLearner
 from jaxrl2.agents.pixel_sac.pixel_ppo_residual_learner import PixelPPOResidualLearner
 from jaxrl2.agents.pixel_sac.pixel_parl_residual_learner import PixelPARLResidualLearner
+from jaxrl2.agents.pixel_sac.pixel_gradq_residual_learner import PixelGradQResidualLearner
 from jaxrl2.utils.general_utils import add_batch_dim
 import numpy as np
 
@@ -224,7 +225,13 @@ def main_residual(variant):
         from libero.libero.envs import OffScreenRenderEnv
         benchmark_dict = benchmark.get_benchmark_dict()
         task_suite = benchmark_dict["libero_10"]()
-        task_id = 8  # KITCHEN_SCENE8_put_both_moka_pots_on_the_stove_demo.hdf5
+        if variant.libero_task:
+            task_names = task_suite.get_task_names()
+            matching = [i for i, name in enumerate(task_names) if name == variant.libero_task]
+            assert len(matching) == 1, f"Task '{variant.libero_task}' not found in libero_10. Available: {task_names}"
+            task_id = matching[0]
+        else:
+            task_id = 8  # KITCHEN_SCENE8_put_both_moka_pots_on_the_stove
         task = task_suite.get_task(task_id)
         env, task_description = _get_libero_env(task, 224, variant.seed)
         eval_env = env
@@ -408,8 +415,46 @@ def main_residual(variant):
         print(f"Initialized Residual PARL with alpha={variant.residual_alpha}, "
               f"N={parl_kwargs['parl_num_samples']}, K={parl_kwargs['parl_num_elites']}, "
               f"grad_steps={parl_kwargs['parl_num_grad_steps']}, step_size={parl_kwargs['parl_step_size']}")
+    elif algo == 'residual_gradq':
+        # GradQ: Simplified PARL (Sample-1 + Grad-Q + BC distillation)
+        gradq_kwargs = {k: v for k, v in kwargs.items() if k not in ['temp_lr', 'init_temperature', 'backup_entropy', 'clip_temp', 'clip_min_temp', 'clip_max_temp', 'target_entropy']}
+        gradq_kwargs['gradq_num_grad_steps'] = variant.get('parl_num_grad_steps', 5)
+        gradq_kwargs['gradq_step_size'] = variant.get('parl_step_size', 0.01)
+        gradq_kwargs['max_grad_norm'] = variant.get('max_grad_norm', 1.0)
+        gradq_kwargs['use_huber_loss'] = variant.get('use_huber_loss', False)
+        gradq_kwargs['huber_delta'] = variant.get('huber_delta', 1.0)
+        gradq_kwargs['num_critic_updates'] = variant.get('num_critic_updates', 2)
+        gradq_kwargs['num_actor_updates'] = variant.get('num_actor_updates', 4)
+        gradq_kwargs['predict_a_exec'] = variant.get('predict_a_exec', False)
+        gradq_kwargs['log_std_min'] = variant.get('log_std_min', -5.0)
+        gradq_kwargs['log_std_max'] = variant.get('log_std_max', 2.0)
+        gradq_kwargs['learn_std'] = variant.get('learn_std', True)
+        gradq_kwargs['use_vlm_embedding'] = variant.get('use_vlm_embedding', False)
+        agent = PixelGradQResidualLearner(variant.seed, sample_obs, sample_action, **gradq_kwargs)
+        print(f"Initialized Residual GradQ with alpha={variant.residual_alpha}, "
+              f"grad_steps={gradq_kwargs['gradq_num_grad_steps']}, step_size={gradq_kwargs['gradq_step_size']}")
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
+
+    # Restore checkpoint if specified
+    restore_path = variant.get('restore_path', '')
+    if restore_path:
+        agent.restore_checkpoint(restore_path)
+        # Extract the step number from the checkpoint filename to resume training
+        # Flax saves files like checkpoint_100000 in the directory
+        import re
+        import glob
+        ckpt_files = sorted(glob.glob(os.path.join(restore_path, 'checkpoint_*')))
+        if ckpt_files:
+            last_ckpt = os.path.basename(ckpt_files[-1])
+            ckpt_match = re.search(r'checkpoint_(\d+)', last_ckpt)
+            if ckpt_match:
+                variant.resume_step = int(ckpt_match.group(1))
+            else:
+                variant.resume_step = 0
+        else:
+            variant.resume_step = 0
+        print(f"Restored checkpoint from {restore_path}, resuming from step {variant.resume_step}")
 
     # Replay buffer
     online_buffer_size = variant.max_steps // variant.multi_grad_step

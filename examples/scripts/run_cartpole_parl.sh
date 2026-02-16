@@ -6,8 +6,8 @@
 #SBATCH --mem=128G                         # Memory per node
 #SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
 #SBATCH --partition=general                # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/cartpole-parl/logs/cartpole_parl_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/sreyasv/cartpole-parl/logs/cartpole_parl_%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/skowshik/cartpole-parl/logs/cartpole_parl_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/skowshik/cartpole-parl/logs/cartpole_parl_%x_%j.err    # Stderr log
 
 # =============================================================================
 # CartPole Test: Residual PA-RL (Policy-Agnostic RL)
@@ -26,10 +26,11 @@ set -e
 # -------------------------------
 # Environment setup
 # -------------------------------
-source /home/sreyasv/miniconda3/etc/profile.d/conda.sh
-conda activate dsrl_pi0
+# source /data/user_data/skowshik/anaconda3/etc/profile.d/conda.sh
+# conda init
+# conda activate dsrl_pi0
 
-mkdir -p /data/user_data/sreyasv/cartpole-parl/logs/
+mkdir -p /data/user_data/skowshik/cartpole-parl/logs/
 
 # -------------------------------
 # Configuration
@@ -41,7 +42,7 @@ export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
 export MUJOCO_EGL_DEVICE_ID=$device_id
 
-export EXP=${EXP:-/data/user_data/sreyasv/dsrl_exp/logs/cartpole-parl}
+export EXP=${EXP:-/data/user_data/skowshik/dsrl_exp/logs/cartpole-parl}
 export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9

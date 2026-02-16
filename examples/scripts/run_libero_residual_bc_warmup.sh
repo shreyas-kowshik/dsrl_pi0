@@ -6,16 +6,16 @@
 #SBATCH --mem=128G                         # Memory per node
 #SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
 #SBATCH --partition=general                # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/r-sac-bc-w/logs/residual_sac_libero_pi0_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/sreyasv/r-sac/logs-bc-w/residual_sac_libero_pi0_%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/skowshik/r-sac-bc-w/logs/residual_sac_libero_pi0_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/skowshik/r-sac/logs-bc-w/residual_sac_libero_pi0_%x_%j.err    # Stderr log
 
 # -------------------------------
 # Environment setup
 # -------------------------------
-source /home/sreyasv/miniconda3/etc/profile.d/conda.sh
+# source /home/skowshik/miniconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0
 
-mkdir -p /data/user_data/sreyasv/r-sac/logs/
+mkdir -p /data/user_data/skowshik/r-sac/logs/
 
 # -------------------------------
 # Configuration
@@ -29,12 +29,12 @@ export PYOPENGL_PLATFORM=egl
 export MUJOCO_EGL_DEVICE_ID=$device_id
 
 export OPENPI_DATA_HOME=/data/hf_cache/pi-models/openpi
-export EXP=/data/user_data/sreyasv/dsrl_exp/logs/$proj_name
+export EXP=/data/user_data/skowshik/dsrl_exp/logs/$proj_name
 export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
-pip install mujoco==3.3.1
+# pip install mujoco==3.3.1
 
 # -------------------------------
 # Launch Residual SAC Training

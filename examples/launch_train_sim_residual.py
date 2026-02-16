@@ -36,6 +36,7 @@ if __name__ == '__main__':
     parser.add_argument('--query_freq', default=-1, help='Query frequency', type=int)
     parser.add_argument('--pi_05_config', default='', help='Config name for Pi-0.5 model', type=str)
     parser.add_argument('--pi_05_ckpt_dir', default='', help='Checkpoint dir for Pi-0.5 model', type=str)
+    parser.add_argument('--libero_task', default='', help='LIBERO task name (e.g. KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it)', type=str)
     
     # CartPole-specific parameters
     parser.add_argument('--cartpole_horizon', default=100, help='Episode horizon for CartPole env', type=int)
@@ -50,8 +51,8 @@ if __name__ == '__main__':
     parser.add_argument('--predict_a_exec', default=0, help='Actor predicts a_exec directly instead of delta (1=yes, 0=no)', type=int)
     parser.add_argument('--learn_std', default=1, help='Whether the policy learns a state-dependent std (1=yes, 0=no)', type=int)
     
-    # Algorithm selection: 'sac', 'residual_sac', 'q_weighted_pg', 'residual_grpo', 'residual_parl'
-    parser.add_argument('--algo', default='residual_sac', help='Algorithm: sac, residual_sac, q_weighted_pg, residual_grpo, residual_parl', type=str)
+    # Algorithm selection: 'sac', 'residual_sac', 'q_weighted_pg', 'residual_grpo', 'residual_parl', 'residual_gradq'
+    parser.add_argument('--algo', default='residual_sac', help='Algorithm: sac, residual_sac, q_weighted_pg, residual_grpo, residual_parl, residual_gradq', type=str)
     
     # PPO/GRPO specific parameters (adv_clip_min/max for clipping advantages)
     parser.add_argument('--actor_tau', default=0.005, help='[DEPRECATED] Target actor soft update rate (not used anymore)', type=float)
@@ -106,6 +107,9 @@ if __name__ == '__main__':
     parser.add_argument('--use_vlm_embedding', default=0, help='Use VLM embeddings instead of raw pixels (1=yes, 0=no)', type=int)
     parser.add_argument('--vlm_embedding_dim', default=2048, help='Hidden dim of VLM embedding (W in [B,S,W])', type=int)
     parser.add_argument('--vlm_seq_len', default=16, help='Sequence length of VLM embedding (S in [B,S,W])', type=int)
+
+    # Checkpoint resume
+    parser.add_argument('--restore_path', default='', help='Path to checkpoint dir to resume training from', type=str)
 
     # Default training kwargs
     train_args_dict = dict(

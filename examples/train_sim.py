@@ -119,7 +119,13 @@ def main(variant):
     if variant.env == 'libero':
         benchmark_dict = benchmark.get_benchmark_dict()
         task_suite = benchmark_dict["libero_10"]()
-        task_id = 8  # KITCHEN_SCENE8_put_both_moka_pots_on_the_stove_demo.hdf5
+        if variant.libero_task:
+            task_names = task_suite.get_task_names()
+            matching = [i for i, name in enumerate(task_names) if name == variant.libero_task]
+            assert len(matching) == 1, f"Task '{variant.libero_task}' not found in libero_10. Available: {task_names}"
+            task_id = matching[0]
+        else:
+            task_id = 8  # KITCHEN_SCENE8_put_both_moka_pots_on_the_stove
         task = task_suite.get_task(task_id)
         env, task_description = _get_libero_env(task, 224, variant.seed)
         eval_env = env

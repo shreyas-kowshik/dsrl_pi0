@@ -1,25 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=residual_parl_pi0       # Job name
+#SBATCH --job-name=residual_gradq_pi0       # Job name
 #SBATCH --nodes=1                          # Number of nodes
 #SBATCH --gres=gpu:1                       # GPUs per node
 #SBATCH --cpus-per-task=12                 # CPU cores per task
 #SBATCH --mem=128G                         # Memory per node
 #SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
 #SBATCH --partition=general                # Partition/queue name
-#SBATCH --output=/data/user_data/skowshik/parl_logs/logs/residual_parl_libero_pi0_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/skowshik/parl_logs/logs/residual_parl_libero_pi0_%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/skowshik/parl_logs/logs/residual_gradq_libero_pi0_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/skowshik/parl_logs/logs/residual_gradq_libero_pi0_%x_%j.err    # Stderr log
 
 # =============================================================================
-# LIBERO: Residual PA-RL (Policy-Agnostic RL) with Pi-0.5
+# LIBERO: Residual GradQ (Gradient-Q) with Pi-0.5
 # =============================================================================
-# Best-of-N sampling from actor + base policy → Q-evaluation → top-K elites
-# → gradient ascent on Q w.r.t. actions → MSE distillation back to actor.
-# Base policy actions are included as candidates by default, ensuring the
-# residual never degrades below base policy quality.
+# Simplified PARL: sample 1 action from actor → gradient ascent on Q w.r.t.
+# action → MSE distillation back to actor. No Best-of-N or elite selection.
 #
 # Usage:
-#   bash examples/scripts/run_libero_residual_parl.sh
-#   sbatch examples/scripts/run_libero_residual_parl.sh
+#   bash examples/scripts/run_libero_residual_gradq.sh
+#   sbatch examples/scripts/run_libero_residual_gradq.sh
 # =============================================================================
 
 # -------------------------------
@@ -33,7 +31,7 @@ mkdir -p /data/user_data/skowshik/parl_logs/logs/
 # -------------------------------
 # Configuration
 # -------------------------------
-proj_name=libero-residual-parl
+proj_name=libero-residual-gradq
 device_id=0
 
 export DISPLAY=:0
@@ -47,16 +45,14 @@ export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
-# pip install mujoco==3.3.1
-
 # -------------------------------
-# Launch Residual PA-RL Training
+# Launch Residual GradQ Training
 # -------------------------------
 python -m examples.launch_train_sim_residual \
-    --algorithm residual_parl \
-    --algo residual_parl \
+    --algorithm residual_gradq \
+    --algo residual_gradq \
     --env libero \
-    --prefix residual_parl_pi05-mokaPots-4k-vlm-a-exec \
+    --prefix residual_gradq_pi05-mokaPots-4k-vlm-a-exec \
     --wandb_project ${proj_name} \
     --batch_size 64 \
     --discount 0.999 \
@@ -86,8 +82,6 @@ python -m examples.launch_train_sim_residual \
     --success_buffer_ratio 0.0 \
     --success_buffer_min_size 100 \
     --predict_a_exec 1 \
-    --parl_num_samples 16 \
-    --parl_num_elites 8 \
     --parl_num_grad_steps 30 \
     --parl_step_size 0.001 \
     --bc_warmup_steps 10000 \

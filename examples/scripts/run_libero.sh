@@ -6,16 +6,16 @@
 #SBATCH --mem=128G                              # Memory per node
 #SBATCH --time=48:00:00                        # Walltime (hh:mm:ss)
 #SBATCH --partition=general                    # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/dsrl_logs/logs/dsrl_libero_10_pi05_put_the_two_mocha_pots_on_the_stove-clean-new-ckpt_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/sreyasv/dsrl_logs/logs/dsrl_libero_10_pi05_put_the_two_mocha_pots_on_the_stove-clean-new-ckpt_%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/skowshik/dsrl_logs/logs/dsrl_libero_10_pi05_put_the_two_mocha_pots_on_the_stove-clean-new-ckpt_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/skowshik/dsrl_logs/logs/dsrl_libero_10_pi05_put_the_two_mocha_pots_on_the_stove-clean-new-ckpt_%x_%j.err    # Stderr log
 
 # -------------------------------
 # Environment setup
 # -------------------------------
-source /home/sreyasv/miniconda3/etc/profile.d/conda.sh
+# source /home/skowshik/miniconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0     # use the correct env (adjust if it's 'seer' or something else)
 
-mkdir -p /data/user_data/sreyasv/dsrl_logs/logs/
+mkdir -p /data/user_data/skowshik/dsrl_logs/logs/
 # -------------------------------
 proj_name=DSRL_pi05_Libero
 device_id=0
@@ -26,12 +26,12 @@ export PYOPENGL_PLATFORM=egl
 export MUJOCO_EGL_DEVICE_ID=$device_id
 
 export OPENPI_DATA_HOME=/data/hf_cache/pi-models/openpi
-export EXP=/data/user_data/sreyasv/dsrl_exp/logs/$proj_name; 
+export EXP=/data/user_data/skowshik/dsrl_exp/logs/$proj_name; 
 export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
-pip install mujoco==3.3.1
+# pip install mujoco==3.3.1
 
 python -m examples.launch_train_sim \
 --algorithm pixel_sac \

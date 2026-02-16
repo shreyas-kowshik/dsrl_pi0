@@ -206,7 +206,8 @@ def trajwise_alternating_training_loop_residual(
               f'min_size={success_buffer_min_size}')
 
     total_env_steps = 0
-    i = 0
+    resume_step = variant.get('resume_step', 0)
+    i = resume_step
     on_policy_ppo = variant.get('on_policy_ppo', False)
     
     # BC warmup configuration
@@ -222,7 +223,10 @@ def trajwise_alternating_training_loop_residual(
     wandb_logger.log({'num_online_trajs': 0}, step=i)
     wandb_logger.log({'env_steps': 0}, step=i)
     
-    with tqdm(total=variant.max_steps, initial=0) as pbar:
+    if resume_step > 0:
+        print(f'[Resume] Resuming training from step {resume_step}')
+
+    with tqdm(total=variant.max_steps, initial=resume_step) as pbar:
         while i <= variant.max_steps:
             traj = collect_traj_residual(variant, agent, env, i, agent_dp)
             traj_id = online_replay_buffer._traj_counter

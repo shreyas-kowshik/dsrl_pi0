@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=residual_parl_pi0       # Job name
+#SBATCH --job-name=residual_parl_pi0-delta_exec       # Job name
 #SBATCH --nodes=1                          # Number of nodes
 #SBATCH --gres=gpu:1                       # GPUs per node
 #SBATCH --cpus-per-task=12                 # CPU cores per task
@@ -7,7 +7,7 @@
 #SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
 #SBATCH --partition=general                # Partition/queue name
 #SBATCH --output=/data/user_data/skowshik/parl_logs/logs/residual_parl_libero_pi0_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/skowshik/parl_logs/logs/residual_parl_libero_pi0_%x_%j.err    # Stderr log
+#SBATCH --error=/data/user_data/skowshik/parl_logs/logs/residual_parl_libero_pi0_%x_%j.out   # Stderr log
 
 # =============================================================================
 # LIBERO: Residual PA-RL (Policy-Agnostic RL) with Pi-0.5
@@ -18,14 +18,13 @@
 # residual never degrades below base policy quality.
 #
 # Usage:
-#   bash examples/scripts/run_libero_residual_parl.sh
-#   sbatch examples/scripts/run_libero_residual_parl.sh
+#   sbatch examples/scripts/slurm/run_libero_residual_parl.sh
 # =============================================================================
 
 # -------------------------------
 # Environment setup
 # -------------------------------
-# source /home/skowshik/miniconda3/etc/profile.d/conda.sh
+source /data/user_data/skowshik/anaconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0
 
 mkdir -p /data/user_data/skowshik/parl_logs/logs/
@@ -56,16 +55,16 @@ python -m examples.launch_train_sim_residual \
     --algorithm residual_parl \
     --algo residual_parl \
     --env libero \
-    --prefix residual_parl_pi05-mokaPots-4k-vlm-a-exec \
+    --prefix residual_parl_pi05-mokaPots-4k-vlm-delta_exec-alpha0.5 \
     --wandb_project ${proj_name} \
     --batch_size 64 \
     --discount 0.999 \
     --seed 0 \
     --max_steps 2500000 \
-    --eval_interval 25000 \
+    --eval_interval 5000 \
     --log_interval 500 \
-    --checkpoint_interval 100000 \
-    --eval_episodes 50 \
+    --checkpoint_interval 10000 \
+    --eval_episodes 10 \
     --multi_grad_step 1 \
     --encoder_type small \
     --start_online_updates 500 \
@@ -73,8 +72,8 @@ python -m examples.launch_train_sim_residual \
     --action_magnitude 1.0 \
     --query_freq 10 \
     --hidden_dims 512 \
-    --pi_05_config pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k \
-    --pi_05_ckpt_dir /data/user_data/skowshik/openpi_cache/pi05_libero_lora_vision_fullft_action_putbothmokapots_task_ep5_bs32_v2_icml/pi05_libero_lora_vision_fullft_action_putbothmokapots_task_ep5_bs32_v2_icml-v1/4000/ \
+    --pi_05_config pi05_libero_gradacc2_2k \
+    --pi_05_ckpt_dir /data/user_data/skowshik/openpi_cache/pi05_libero_lora_vision_lora_action_putbothmokapots_task_ep29_bs64_v1_gradacc_2/pi05_libero_lora_vision_lora_action_putbothmokapots_task_ep29_bs64_v1_gradacc_2-v1/2000/ \
     --residual_alpha 0.5 \
     --chunk_len 10 \
     --use_zero_residual_initially 1 \
@@ -85,12 +84,12 @@ python -m examples.launch_train_sim_residual \
     --bc_on_success_only 0 \
     --success_buffer_ratio 0.0 \
     --success_buffer_min_size 100 \
-    --predict_a_exec 1 \
+    --predict_a_exec 0 \
     --parl_num_samples 16 \
     --parl_num_elites 8 \
     --parl_num_grad_steps 30 \
     --parl_step_size 0.001 \
-    --bc_warmup_steps 10000 \
+    --bc_warmup_steps 0 \
     --bc_warmup_num_critic_updates 8 \
     --bc_warmup_num_actor_updates 4 \
     --tau 0.05 \

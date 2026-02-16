@@ -27,6 +27,7 @@ if __name__ == '__main__':
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
     parser.add_argument('--pi_05_config', default='', help='config name for pi05 model', type=str)
     parser.add_argument('--pi_05_ckpt_dir', default='', help='checkpoint dir for pi05 model', type=str)
+    parser.add_argument('--libero_task', default='', help='LIBERO task name (e.g. KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it)', type=str)
     
     # VLM embedding flags
     parser.add_argument('--use_vlm_embedding', default=0, help='Use VLM embeddings instead of pixels (0 or 1)', type=int)

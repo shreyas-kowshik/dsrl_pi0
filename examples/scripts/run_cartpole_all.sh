@@ -6,8 +6,8 @@
 #SBATCH --mem=128G                         # Memory per node
 #SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
 #SBATCH --partition=general                # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/cartpole-all/logs/cartpole_all_%x_%j.out   # Stdout log
-#SBATCH --error=/data/user_data/sreyasv/cartpole-all/logs/cartpole_all_%x_%j.err    # Stderr log
+#SBATCH --output=/data/user_data/skowshik/cartpole-all/logs/cartpole_all_%x_%j.out   # Stdout log
+#SBATCH --error=/data/user_data/skowshik/cartpole-all/logs/cartpole_all_%x_%j.err    # Stderr log
 
 # =============================================================================
 # CartPole Test: Run ALL algorithms sequentially
@@ -25,10 +25,10 @@ set -e
 # -------------------------------
 # Environment setup
 # -------------------------------
-source /home/sreyasv/miniconda3/etc/profile.d/conda.sh
+# source /home/skowshik/miniconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0
 
-mkdir -p /data/user_data/sreyasv/cartpole-all/logs/
+mkdir -p /data/user_data/skowshik/cartpole-all/logs/
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

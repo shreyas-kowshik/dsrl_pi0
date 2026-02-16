@@ -6,16 +6,16 @@
 #SBATCH --mem=128G                         # Memory per node
 #SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
 #SBATCH --partition=general                # Partition/queue name
-#SBATCH --output=/data/user_data/sreyasv/grpo_bc_warmup_logs/logs/grpo_bc_warmup_%x_%j.out
-#SBATCH --error=/data/user_data/sreyasv/grpo_bc_warmup_logs/logs/grpo_bc_warmup_%x_%j.err
+#SBATCH --output=/data/user_data/skowshik/grpo_bc_warmup_logs/logs/grpo_bc_warmup_%x_%j.out
+#SBATCH --error=/data/user_data/skowshik/grpo_bc_warmup_logs/logs/grpo_bc_warmup_%x_%j.err
 
 # -------------------------------
 # Environment setup
 # -------------------------------
-source /home/sreyasv/miniconda3/etc/profile.d/conda.sh
+# source /home/skowshik/miniconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0
 
-mkdir -p /data/user_data/sreyasv/grpo_bc_warmup_logs/logs/
+mkdir -p /data/user_data/skowshik/grpo_bc_warmup_logs/logs/
 
 # -------------------------------
 # Configuration
@@ -29,12 +29,12 @@ export PYOPENGL_PLATFORM=egl
 export MUJOCO_EGL_DEVICE_ID=$device_id
 
 export OPENPI_DATA_HOME=/data/hf_cache/pi-models/openpi
-export EXP=/data/user_data/sreyasv/grpo_bc_warmup_exp/logs/$proj_name
+export EXP=/data/user_data/skowshik/grpo_bc_warmup_exp/logs/$proj_name
 export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
-pip install mujoco==3.3.1
+# pip install mujoco==3.3.1
 
 # -------------------------------
 # Launch Residual GRPO with BC Warmup

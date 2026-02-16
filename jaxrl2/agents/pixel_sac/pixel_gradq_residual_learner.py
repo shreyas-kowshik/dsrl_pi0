@@ -1,16 +1,16 @@
-"""Residual PARL (Policy-Agnostic RL) Learner for Pixel Observations.
+"""Residual GradQ (Gradient-Q) Learner for Pixel Observations.
 
-This module implements a Residual PARL agent where:
+This module implements a Residual GradQ agent where:
 - A frozen base policy (e.g., Pi-0.5) produces base action chunks
 - The actor predicts residual actions in environment action space
 - Executed actions are: a_exec = clip(base_action + alpha * delta, -1, 1)
 - Critic learns Q(s, a_exec) via TD learning (standard)
 - Actor is trained by:
-  1. Sampling N actions from the actor
-  2. Evaluating with Q, keeping top-K elites
-  3. Refining elites via gradient ascent on Q w.r.t. action
-  4. Distilling the best refined action back into the actor via MSE (BC loss)
+  1. Sampling 1 action from the actor
+  2. Refining via gradient ascent on Q w.r.t. action
+  3. Distilling the refined action back into the actor via MSE (BC loss)
 
+Simplified variant of PARL that skips Best-of-N selection and elite filtering.
 The actor NEVER differentiates through the critic. The critic only provides
 stop-gradient targets, avoiding issues with tanh squashing, action clipping, etc.
 """
@@ -38,7 +38,7 @@ from jaxrl2.networks.encoders.networks import Encoder, PixelMultiplexer
 from jaxrl2.networks.encoders.impala_encoder import ImpalaEncoder, SmallerImpalaEncoder
 from jaxrl2.networks.encoders.resnet_encoderv1 import ResNet18, ResNet34, ResNetSmall
 from jaxrl2.networks.encoders.resnet_encoderv2 import ResNetV2Encoder
-from jaxrl2.agents.pixel_sac.residual_actor_updater import update_actor_residual_parl, update_actor_bc_residual
+from jaxrl2.agents.pixel_sac.residual_actor_updater import update_actor_residual_gradq, update_actor_bc_residual
 from jaxrl2.agents.pixel_sac.residual_critic_updater import update_critic_residual
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.networks.learned_std_normal_policy import LearnedStdTanhNormalPolicy, FixedStdTanhNormalPolicy
@@ -78,13 +78,13 @@ def _update_critic_jit(
     predict_a_exec: bool = False,
     use_vlm_embedding: bool = False,
 ) -> Tuple[PRNGKey, TrainState, Params, Dict[str, float]]:
-    """JIT-compiled critic update (same as PPO/SAC — standard TD learning)."""
-    
+    """JIT-compiled critic update (standard TD learning)."""
+
     if not use_vlm_embedding:
         # Data augmentation for pixels (skip when using VLM embeddings)
         aug_pixels = batch['observations']['pixels']
         aug_next_pixels = batch['next_observations']['pixels']
-        
+
         if batch['observations']['pixels'].squeeze().ndim != 2:
             rng, key = jax.random.split(rng)
             aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
@@ -116,7 +116,7 @@ def _update_critic_jit(
                     aug_next_pixels = (color_transform(key, aug_next_pixels.astype(jnp.float32)/255.)*255).astype(jnp.uint8)
             next_observations = batch['next_observations'].copy(add_or_replace={'pixels': aug_next_pixels})
             batch = batch.copy(add_or_replace={'next_observations': next_observations})
-    
+
     # Critic update via TD learning
     key, rng = jax.random.split(rng)
     target_critic = critic.replace(params=target_critic_params)
@@ -129,17 +129,17 @@ def _update_critic_jit(
         predict_a_exec=predict_a_exec,
     )
     new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
-    
+
     return rng, new_critic, new_target_critic_params, critic_info
 
 
 @functools.partial(jax.jit, static_argnames=(
     'color_jitter', 'num_cameras',
     'query_frequency', 'action_dim',
-    'parl_num_samples', 'parl_num_elites', 'parl_num_grad_steps',
+    'gradq_num_grad_steps',
     'critic_reduction', 'predict_a_exec', 'use_vlm_embedding',
 ))
-def _update_actor_parl_jit(
+def _update_actor_gradq_jit(
     rng: PRNGKey,
     actor: TrainState,
     critic: TrainState,
@@ -149,20 +149,18 @@ def _update_actor_parl_jit(
     num_cameras: int,
     query_frequency: int,
     action_dim: int,
-    parl_num_samples: int,
-    parl_num_elites: int,
-    parl_num_grad_steps: int,
-    parl_step_size: float,
+    gradq_num_grad_steps: int,
+    gradq_step_size: float,
     critic_reduction: str,
     predict_a_exec: bool = False,
     use_vlm_embedding: bool = False,
 ) -> Tuple[PRNGKey, TrainState, Dict[str, float]]:
-    """JIT-compiled PARL actor update (Best-of-N + Grad-Q + BC distillation)."""
-    
+    """JIT-compiled GradQ actor update (Sample-1 + Grad-Q + BC distillation)."""
+
     if not use_vlm_embedding:
         # Data augmentation for pixels (skip when using VLM embeddings)
         aug_pixels = batch['observations']['pixels']
-        
+
         if batch['observations']['pixels'].squeeze().ndim != 2:
             rng, key = jax.random.split(rng)
             aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
@@ -179,20 +177,18 @@ def _update_actor_parl_jit(
 
         observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
         batch = batch.copy(add_or_replace={'observations': observations})
-    
-    # PARL actor update
+
+    # GradQ actor update
     key, rng = jax.random.split(rng)
-    new_actor, actor_info = update_actor_residual_parl(
+    new_actor, actor_info = update_actor_residual_gradq(
         key, actor, critic, batch,
         residual_alpha, query_frequency, action_dim,
-        parl_num_samples=parl_num_samples,
-        parl_num_elites=parl_num_elites,
-        parl_num_grad_steps=parl_num_grad_steps,
-        parl_step_size=parl_step_size,
+        gradq_num_grad_steps=gradq_num_grad_steps,
+        gradq_step_size=gradq_step_size,
         critic_reduction=critic_reduction,
         predict_a_exec=predict_a_exec,
     )
-    
+
     return rng, new_actor, actor_info
 
 
@@ -210,11 +206,11 @@ def _update_actor_bc_jit(
     use_vlm_embedding: bool = False,
 ) -> Tuple[PRNGKey, TrainState, Dict[str, float]]:
     """JIT-compiled BC warmup actor update."""
-    
+
     if not use_vlm_embedding:
         # Data augmentation for pixels (skip when using VLM embeddings)
         aug_pixels = batch['observations']['pixels']
-        
+
         if batch['observations']['pixels'].squeeze().ndim != 2:
             rng, key = jax.random.split(rng)
             aug_pixels = batched_random_crop(key, batch['observations']['pixels'])
@@ -231,30 +227,32 @@ def _update_actor_bc_jit(
 
         observations = batch['observations'].copy(add_or_replace={'pixels': aug_pixels})
         batch = batch.copy(add_or_replace={'observations': observations})
-    
+
     # BC warmup actor update
     key, rng = jax.random.split(rng)
     new_actor, actor_info = update_actor_bc_residual(
         key, actor, batch, query_frequency,
         predict_a_exec=predict_a_exec,
     )
-    
+
     return rng, new_actor, actor_info
 
 
 # ============================================================
-# PARL Learner
+# GradQ Learner
 # ============================================================
 
-class PixelPARLResidualLearner(Agent):
-    """Residual PARL Learner for pixel observations.
-    
-    Policy-Agnostic RL: the actor is trained by distilling Q-optimized
-    actions rather than by differentiating through the critic.
-    
+class PixelGradQResidualLearner(Agent):
+    """Residual GradQ Learner for pixel observations.
+
+    Simplified Policy-Agnostic RL: the actor is trained by distilling
+    Q-gradient-refined actions rather than by differentiating through the critic.
+    Unlike PARL, this skips Best-of-N sampling and elite selection — it samples
+    a single action and directly refines it via gradient ascent on Q.
+
     Training loop:
-    - Critic: standard TD learning (same as SAC/GRPO)
-    - Actor: Best-of-N sampling → Q-gradient refinement → MSE distillation
+    - Critic: standard TD learning (same as SAC/GRPO/PARL)
+    - Actor: Sample-1 → Q-gradient refinement → MSE distillation
     """
 
     def __init__(
@@ -292,11 +290,9 @@ class PixelPARLResidualLearner(Agent):
         color_jitter: bool = True,
         aug_next: bool = True,
         num_cameras: int = 1,
-        # PARL-specific parameters
-        parl_num_samples: int = 16,
-        parl_num_elites: int = 4,
-        parl_num_grad_steps: int = 5,
-        parl_step_size: float = 0.01,
+        # GradQ-specific parameters
+        gradq_num_grad_steps: int = 5,
+        gradq_step_size: float = 0.01,
         # Stability
         max_grad_norm: float = 1.0,
         use_huber_loss: bool = False,
@@ -314,19 +310,17 @@ class PixelPARLResidualLearner(Agent):
         cnn_strides: Sequence[int] = (2, 2, 2, 2),
         cnn_padding: str = 'VALID',
     ):
-        """Initialize Residual PARL learner.
-        
+        """Initialize Residual GradQ learner.
+
         Args:
-            parl_num_samples: N — number of action candidates sampled from actor.
-            parl_num_elites: K — number of top-Q actions kept for refinement.
-            parl_num_grad_steps: Number of gradient ascent steps on Q w.r.t. action.
-            parl_step_size: Learning rate for gradient ascent on actions.
+            gradq_num_grad_steps: Number of gradient ascent steps on Q w.r.t. action.
+            gradq_step_size: Learning rate for gradient ascent on actions.
         """
         self._residual_alpha = jnp.asarray(residual_alpha, dtype=jnp.float32)
         self.color_jitter = color_jitter
         self.aug_next = aug_next
         self.num_cameras = num_cameras
-        
+
         self.query_frequency = actions.shape[1]
         self.action_dim = np.prod(actions.shape[-2:])
         self.action_chunk_shape = actions.shape[-2:]
@@ -335,29 +329,27 @@ class PixelPARLResidualLearner(Agent):
         self.tau = tau
         self.discount = discount
         self.critic_reduction = critic_reduction
-        self.algo = 'residual_parl'
-        
-        # PARL parameters
-        self.parl_num_samples = parl_num_samples
-        self.parl_num_elites = parl_num_elites
-        self.parl_num_grad_steps = parl_num_grad_steps
-        self.parl_step_size = parl_step_size
-        
+        self.algo = 'residual_gradq'
+
+        # GradQ parameters
+        self.gradq_num_grad_steps = gradq_num_grad_steps
+        self.gradq_step_size = gradq_step_size
+
         # Stability
         self.max_grad_norm = max_grad_norm
         self.use_huber_loss = use_huber_loss
         self.huber_delta = huber_delta
-        
+
         # Update ratios
         self.num_critic_updates = num_critic_updates
         self.num_actor_updates = num_actor_updates
-        
+
         # Action prediction mode
         self.predict_a_exec = predict_a_exec
-        
+
         # VLM embedding mode
         self.use_vlm_embedding = use_vlm_embedding
-        
+
         if predict_a_exec:
             print(f'[WARNING] predict_a_exec=True: residual_alpha={residual_alpha} is IGNORED '
                   f'for action composition. Actor predicts a_exec directly.')
@@ -396,15 +388,15 @@ class PixelPARLResidualLearner(Agent):
 
         if len(hidden_dims) == 1:
             hidden_dims = (hidden_dims[0], hidden_dims[0], hidden_dims[0])
-        
+
         # ----- Actor -----
         if learn_std:
             policy_def = LearnedStdTanhNormalPolicy(
-                hidden_dims, self.action_dim, 
-                dropout_rate=dropout_rate, 
+                hidden_dims, self.action_dim,
+                dropout_rate=dropout_rate,
                 log_std_min=log_std_min,
                 log_std_max=log_std_max,
-                low=-action_magnitude, 
+                low=-action_magnitude,
                 high=action_magnitude
             )
         else:
@@ -424,7 +416,7 @@ class PixelPARLResidualLearner(Agent):
             pop_base_actions=False,
             use_vlm_embedding=use_vlm_embedding,
         )
-        print(f"PARL Actor: {actor_def}")
+        print(f"GradQ Actor: {actor_def}")
         actor_def_init = actor_def.init(actor_key, observations)
         actor_params = actor_def_init['params']
         actor_batch_stats = actor_def_init.get('batch_stats', None)
@@ -450,14 +442,14 @@ class PixelPARLResidualLearner(Agent):
             pop_base_actions=critic_pop_base_actions,
             use_vlm_embedding=use_vlm_embedding,
         )
-        print(f"PARL Critic: {critic_def}")
-        
+        print(f"GradQ Critic: {critic_def}")
+
         actions_flat = actions.reshape(actions.shape[0], -1)
         critic_def_init = critic_def.init(critic_key, observations, actions_flat)
 
         critic_params = critic_def_init['params']
         critic_batch_stats = critic_def_init.get('batch_stats', None)
-        
+
         critic_optimizer = optax.chain(
             optax.clip_by_global_norm(max_grad_norm),
             optax.adam(learning_rate=critic_lr_schedule),
@@ -469,22 +461,20 @@ class PixelPARLResidualLearner(Agent):
             batch_stats=critic_batch_stats
         )
         target_critic_params = copy.deepcopy(critic_params)
-        
+
         self._rng = rng
         self._actor = actor
         self._critic = critic
         self._target_critic_params = target_critic_params
 
-        print(f'PARL Residual Learner initialized:')
+        print(f'GradQ Residual Learner initialized:')
         print(f'  residual_alpha: {self._residual_alpha}')
         print(f'  query_frequency: {self.query_frequency}')
         print(f'  action_dim: {self.action_dim}')
         print(f'  action_dim_per_step: {self.action_dim_per_step}')
         print(f'  critic_reduction: {self.critic_reduction}')
-        print(f'  parl_num_samples (N): {self.parl_num_samples}')
-        print(f'  parl_num_elites (K): {self.parl_num_elites}')
-        print(f'  parl_num_grad_steps: {self.parl_num_grad_steps}')
-        print(f'  parl_step_size: {self.parl_step_size}')
+        print(f'  gradq_num_grad_steps: {self.gradq_num_grad_steps}')
+        print(f'  gradq_step_size: {self.gradq_step_size}')
         print(f'  use_huber_loss: {self.use_huber_loss}')
         print(f'  huber_delta: {self.huber_delta}')
         print(f'  max_grad_norm: {self.max_grad_norm}')
@@ -525,8 +515,8 @@ class PixelPARLResidualLearner(Agent):
         return critic_info
 
     def update_actor(self, batch: FrozenDict) -> Dict[str, float]:
-        """Perform a single PARL actor update (Best-of-N + Grad-Q + BC distill)."""
-        new_rng, new_actor, actor_info = _update_actor_parl_jit(
+        """Perform a single GradQ actor update (Sample-1 + Grad-Q + BC distill)."""
+        new_rng, new_actor, actor_info = _update_actor_gradq_jit(
             self._rng,
             self._actor,
             self._critic,
@@ -536,10 +526,8 @@ class PixelPARLResidualLearner(Agent):
             self.num_cameras,
             self.query_frequency,
             self.action_dim_per_step,
-            self.parl_num_samples,
-            self.parl_num_elites,
-            self.parl_num_grad_steps,
-            self.parl_step_size,
+            self.gradq_num_grad_steps,
+            self.gradq_step_size,
             self.critic_reduction,
             self.predict_a_exec,
             self.use_vlm_embedding,
@@ -568,11 +556,11 @@ class PixelPARLResidualLearner(Agent):
         """Perform one critic + one actor update (backward compat)."""
         critic_info = self.update_critic(batch)
         actor_info = self.update_actor(batch)
-        
+
         all_info = {**critic_info, **actor_info}
         all_info['residual/alpha'] = float(self._residual_alpha)
         all_info['algo'] = self.algo
-        
+
         return all_info
 
     # ============================================================
@@ -600,7 +588,7 @@ class PixelPARLResidualLearner(Agent):
 
             for t in range(0, len(actions)):
                 action = actions[t][None]
-                
+
                 obs_dict = {}
                 for k, v in observations.items():
                     obs_dict[k] = v[t][None]
@@ -611,7 +599,7 @@ class PixelPARLResidualLearner(Agent):
                     a_exec = np.clip(action.squeeze(0), -1.0, 1.0)
                 else:
                     a_exec = np.clip(
-                        base_action_squeezed[:self.query_frequency] + self._residual_alpha * action.squeeze(0), 
+                        base_action_squeezed[:self.query_frequency] + self._residual_alpha * action.squeeze(0),
                         -1.0, 1.0
                     )
                 a_exec_flat = a_exec.reshape(1, -1)
@@ -620,8 +608,8 @@ class PixelPARLResidualLearner(Agent):
                 q_pred.append(q_value)
 
             traj_images.append(make_visual_residual(q_pred, rewards, masks, observations['pixels']))
-        
-        print('Finished reward value visuals for PARL.')
+
+        print('Finished reward value visuals for GradQ.')
         return np.concatenate(traj_images, 0)
 
     @property
@@ -647,7 +635,7 @@ class PixelPARLResidualLearner(Agent):
             self.algo = output_dict['algo']
         if 'predict_a_exec' in output_dict:
             self.predict_a_exec = bool(output_dict['predict_a_exec'])
-        print(f'Restored PARL checkpoint from {dir} (algo: {self.algo}, predict_a_exec: {self.predict_a_exec})')
+        print(f'Restored GradQ checkpoint from {dir} (algo: {self.algo}, predict_a_exec: {self.predict_a_exec})')
 
 
 # ============================================================
@@ -693,7 +681,7 @@ def make_visual_residual(q_estimates, rewards, masks, images):
     axs[2].plot(rewards, linestyle='--', marker='o')
     axs[2].set_ylabel('Rewards')
     axs[2].set_xlim([0, len(rewards)])
-    
+
     axs[3].plot(masks, linestyle='--', marker='d')
     axs[3].set_ylabel('Masks')
     axs[3].set_xlim([0, len(masks)])
