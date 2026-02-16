@@ -113,7 +113,7 @@ def find_diagnostics_dirs(exp_base: str, prefix: str) -> list:
 # ---------------------------------------------------------------------------
 
 PLOT_META = {
-    'Q01_multistep_consistency': ('Q-Function', 'Q01: Multi-step Consistency', True),
+    'Q01_multistep_consistency': ('Q-Function', 'Q01: Multi-step Consistency', False),
     'Q02_q_vs_qtarg':           ('Q-Function', 'Q02: Q vs Q-target Scatter', True),
     'Q03_td_error':             ('Q-Function', 'Q03: TD-Error Trajectory', False),
     'Q04_q_base':               ('Q-Function', 'Q04: Q(s, base_action)', False),

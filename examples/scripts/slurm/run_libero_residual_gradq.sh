@@ -51,17 +51,20 @@ python -m examples.launch_train_sim_residual \
     --algorithm residual_gradq \
     --algo residual_gradq \
     --env libero \
-    --prefix residual_gradq_pi05-mokaPots-4k-vlm-a-exec \
+    --prefix residual_gradq_pi05-mokaPots-4k-vlm-a-exec-with-diagnostics \
     --wandb_project ${proj_name} \
     --batch_size 64 \
     --discount 0.999 \
     --seed 0 \
     --max_steps 2500000 \
-    --eval_interval 25000 \
+    --multi_grad_step 1 \
+    \
+    --eval_interval 10000 \
+    --eval_episodes 50 \
     --log_interval 500 \
     --checkpoint_interval 100000 \
-    --eval_episodes 50 \
-    --multi_grad_step 1 \
+    --diagnostic_freq 5 \
+    \
     --encoder_type small \
     --start_online_updates 500 \
     --resize_image 100 \

@@ -84,7 +84,7 @@ bash examples/scripts/run_real.sh
 ```
 python3 -m examples.visualize_diagnostics \
     --sh_path examples/scripts/slurm/run_libero_residual_sac_sgd_small_actor_no_aexec.sh \
-    --port 8502 --step 10000
+    --port 8502 --step 20000
 
 ```
 

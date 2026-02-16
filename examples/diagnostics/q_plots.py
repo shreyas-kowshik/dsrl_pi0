@@ -17,7 +17,6 @@ from examples.diagnostics.jax_compute import (
     compute_q_values_all_heads,
     compute_q_reduced,
     compute_td_error_single_step,
-    estimate_v_soft,
     compute_q_action_gradient_per_head,
     compute_mc_returns,
     sample_k_exec_actions,
@@ -72,117 +71,161 @@ def _get_a_base_flat(traj, t, query_frequency):
 
 
 # ============================================================================
-# Q01 — Multi-step consistency curve
+# Q01 — Per-trajectory multi-step consistency
 # ============================================================================
 
-def plot_q01_multistep_consistency(all_traj_data, agent_internals, variant, save_dir):
-    """Q01: Multi-step consistency curve (Q vs n-step bootstrapped return).
+def _get_training_query_rewards_and_masks(traj, variant):
+    """Convert eval per-env-step rewards to training-convention query-step values.
 
-    Generates animated .mp4 where each frame adds a new n value to the curve.
+    Reproduces the exact reward/mask transformation from collect_traj_residual
+    (train_utils_sim_residual.py lines 653-669) so the n-step return matches
+    what the critic was trained on.
+
+    Returns:
+        query_rewards: (T_query,) per-query-step rewards.
+        masks: (T_query,) terminal masks (0=done, 1=continue).
+    """
+    qf = variant.query_freq
+    T_steps = len(traj.rewards)
+    query_steps = len(traj.base_actions)  # T_query
+
+    reward_type = variant.get('reward_type', 'sparse')
+    if reward_type == 'dense':
+        # Dense: sum raw env rewards within each query step
+        query_rewards = np.zeros(query_steps)
+        for q in range(query_steps):
+            start = q * qf
+            end = min(start + qf, T_steps)
+            query_rewards[q] = np.sum(traj.rewards[start:end])
+        if traj.is_success:
+            masks = np.concatenate([np.ones(query_steps - 1), [0.0]])
+        else:
+            masks = np.ones(query_steps)
+    else:
+        # Sparse: -1 per non-terminal query step, 0 at terminal success
+        if traj.is_success:
+            query_rewards = np.concatenate([-np.ones(query_steps - 1), [0.0]])
+            masks = np.concatenate([np.ones(query_steps - 1), [0.0]])
+        else:
+            query_rewards = -np.ones(query_steps)
+            masks = np.ones(query_steps)
+
+    return query_rewards, masks
+
+
+def plot_q01_multistep_consistency(traj, traj_idx, agent_internals, variant, save_dir):
+    """Q01: Per-trajectory multi-step consistency (Q_pred vs G_t^n for varying n).
+
+    For each query-step t, computes the n-step bootstrapped return:
+        G_t^n = sum_{k=0}^{n-1} gamma_q^k * R_{t+k} * mask_prod_{0..k-1}
+                + gamma_q^n * mask_prod_{0..n-1} * Q_mean(s_{t+n}, a_{t+n})
+
+    where:
+        gamma_q = gamma^query_freq  (per-query-step discount, matching critic training)
+        R_{t+k} = training-convention reward at query step t+k
+        mask_prod = product of masks (handles terminal states)
+        Q_mean = mean across ensemble heads at the actual executed action
+
+    Plots one line per n overlaid on the trajectory, with Q_pred as reference.
     Saved to {save_dir}/Q01_multistep_consistency.mp4
     """
     n_list = [1, 2, 4, 8, 16, 32]
     gamma = variant.discount
     qf = variant.query_freq
-    predict_a_exec = variant.get('predict_a_exec', False)
 
     ai = agent_internals
-    rng = jax.random.PRNGKey(42)
 
-    # Collect all (Q_pred, G_t^n) pairs for each n
-    mae_per_n = []
-    bias_per_n = []
+    T_query = len(traj.obs_dicts) - 1
+    if T_query < 2:
+        return
 
+    # Effective per-query-step discount (matches critic Bellman: gamma^qf)
+    gamma_q = gamma ** qf
+
+    # Get rewards/masks in the same convention as the critic training
+    query_rewards, masks = _get_training_query_rewards_and_masks(traj, variant)
+
+    # --- Precompute Q_mean(s_t, a_exec_t) for all timesteps ---
+    q_pred = np.zeros(T_query)
+    for t in range(T_query):
+        obs_t = _prepare_obs_for_critic(traj.obs_dicts[t])
+        a_exec_flat = _get_a_exec_flat(traj, t, qf)
+        qs = np.array(compute_q_values_all_heads(
+            ai['critic_params'], ai['critic_apply_fn'], obs_t, a_exec_flat))
+        q_pred[t] = qs[:, 0].mean()  # mean across ensemble heads
+
+    # --- Compute n-step returns for each n ---
+    g_n_returns = {}
     for n in n_list:
-        q_preds = []
-        g_targets = []
+        g_n = np.full(T_query, np.nan)
+        for t in range(T_query):
+            t_end = min(t + n, T_query)
+            actual_n = t_end - t
 
-        for traj in all_traj_data:
-            T_query = len(traj.obs_dicts) - 1  # last obs is for bootstrapping
-            for t in range(T_query):
-                obs_t = _prepare_obs_for_critic(traj.obs_dicts[t])
-                a_exec_flat = _get_a_exec_flat(traj, t, qf)
+            # Accumulate discounted rewards with mask propagation
+            R_n = 0.0
+            mask_prod = 1.0
+            for k in range(actual_n):
+                R_n += (gamma_q ** k) * mask_prod * query_rewards[t + k]
+                mask_prod *= masks[t + k]
+                if mask_prod == 0.0:
+                    break  # hit terminal, no further rewards or bootstrap
 
-                # Q prediction at (s_t, a_exec_t)
-                q_pred = float(compute_q_reduced(
-                    ai['critic_params'], ai['critic_apply_fn'],
-                    obs_t, a_exec_flat, ai['critic_reduction']).squeeze())
-                q_preds.append(q_pred)
-
-                # n-step return
-                t_end = min(t + n, T_query)
-                actual_n = t_end - t
-
-                # Sum discounted rewards over n steps
-                R_n = 0.0
-                terminated_before = False
-                for k in range(actual_n):
-                    step_idx = t + k
-                    # Map query step to env reward (use query_frequency)
-                    env_start = step_idx * qf
-                    env_end = min(env_start + qf, len(traj.rewards))
-                    for s, env_t in enumerate(range(env_start, env_end)):
-                        R_n += (gamma ** (k * qf + s)) * traj.rewards[env_t]
-
-                    if traj.terminated and env_end >= len(traj.rewards):
-                        terminated_before = True
-                        break
-
-                # Bootstrap at s_{t+n} if not terminated
+            # Bootstrap with Q_mean at s_{t+n} using actual executed action
+            if mask_prod > 0.0 and t_end < T_query:
+                bootstrap = (gamma_q ** actual_n) * mask_prod * q_pred[t_end]
+            else:
                 bootstrap = 0.0
-                if not terminated_before and t_end < len(traj.obs_dicts):
-                    rng, key = jax.random.split(rng)
-                    obs_tn = _prepare_obs_for_critic(traj.obs_dicts[t_end])
-                    v_soft = float(estimate_v_soft(
-                        key,
-                        ai['actor_apply_fn'], ai['actor_params'], ai['actor_batch_stats'],
-                        ai['critic_apply_fn'], ai['target_critic_params'],
-                        ai['temp_apply_fn'], ai['temp_params'],
-                        obs_tn,
-                        ai['residual_alpha'], qf,
-                        K=10, reduction=ai['critic_reduction'],
-                        predict_a_exec=predict_a_exec,
-                    ))
-                    bootstrap = (gamma ** (actual_n * qf)) * v_soft
 
-                G_n = R_n + bootstrap
-                g_targets.append(G_n)
+            g_n[t] = R_n + bootstrap
 
-        q_preds = np.array(q_preds)
-        g_targets = np.array(g_targets)
-        mae_per_n.append(np.mean(np.abs(q_preds - g_targets)))
-        bias_per_n.append(np.mean(q_preds - g_targets))
+        g_n_returns[n] = g_n
 
-    # Animate: each frame adds next n
+    # --- Animate: progressively reveal timesteps ---
     figures = []
-    for frame_idx in range(1, len(n_list) + 1):
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    step_interval = max(1, T_query // 20)
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
 
-        ns = n_list[:frame_idx]
-        maes = mae_per_n[:frame_idx]
-        biases = bias_per_n[:frame_idx]
+    for end_t in range(step_interval, T_query + 1, step_interval):
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8),
+                                 gridspec_kw={'height_ratios': [1, 4]})
 
-        ax1.plot(ns, maes, 'o-', color='steelblue', linewidth=2)
-        ax1.set_xscale('log', base=2)
-        ax1.set_xlabel('n (bootstrap horizon)')
-        ax1.set_ylabel('MAE')
-        ax1.set_title('Q01: Multi-step Consistency (MAE)')
-        ax1.grid(True, alpha=0.3)
+        # Row 0: camera frame
+        cur_frame = _get_frame_at_step(traj.images, end_t - 1, qf)
+        if cur_frame is not None:
+            axes[0].imshow(cur_frame)
+        axes[0].set_title(f'Traj {traj_idx}, t={end_t-1} (success={traj.is_success})')
+        axes[0].axis('off')
 
-        ax2.plot(ns, biases, 's-', color='coral', linewidth=2)
-        ax2.axhline(0, color='gray', linestyle='--', alpha=0.5)
-        ax2.set_xscale('log', base=2)
-        ax2.set_xlabel('n (bootstrap horizon)')
-        ax2.set_ylabel('Bias (Q_pred - G_n)')
-        ax2.set_title('Q01: Multi-step Consistency (Bias)')
-        ax2.grid(True, alpha=0.3)
+        # Row 1: Q_pred and G_t^n lines
+        t_range = np.arange(end_t)
+        axes[1].plot(t_range, q_pred[:end_t], color='black', linewidth=2.5,
+                     label='Q_pred (mean)', zorder=10)
 
-        fig.suptitle('Q01: Multi-step Consistency Curve', fontsize=14)
+        for i, n in enumerate(n_list):
+            vals = g_n_returns[n][:end_t]
+            valid = ~np.isnan(vals)
+            if valid.any():
+                axes[1].plot(t_range[valid], vals[valid],
+                             color=colors[i % len(colors)],
+                             linewidth=1.5, alpha=0.8,
+                             label=f'G(n={n})')
+
+        axes[1].set_xlabel('Query step t')
+        axes[1].set_ylabel('Value')
+        axes[1].set_title('Q01: Multi-step Consistency')
+        axes[1].set_xlim(0, T_query)
+        axes[1].legend(loc='upper right', fontsize=8, ncol=2)
+        axes[1].grid(True, alpha=0.3)
+
+        if traj.terminated:
+            axes[1].axvline(T_query - 1, color='red', linestyle=':', alpha=0.7)
+
         plt.tight_layout()
         figures.append(fig)
 
     filepath = os.path.join(save_dir, 'Q01_multistep_consistency.mp4')
-    save_figures_as_mp4(figures, filepath, fps=1)
+    save_figures_as_mp4(figures, filepath, fps=2)
 
 
 # ============================================================================

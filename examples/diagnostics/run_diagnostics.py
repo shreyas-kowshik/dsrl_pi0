@@ -90,10 +90,10 @@ def generate_all_diagnostics(agent, all_traj_data, step_i, variant):
     Directory structure:
         {variant.outputdir}/diagnostics/step_{step_i}/
             aggregate/
-                Q01_multistep_consistency.mp4
                 Q02_q_vs_qtarg.mp4
                 Q08_td_histogram.mp4
             traj_{rollout_id}/
+                Q01_multistep_consistency.mp4
                 Q03_td_error.mp4
                 Q04_q_base.mp4
                 Q05_q_exec.mp4
@@ -136,6 +136,13 @@ def generate_all_diagnostics(agent, all_traj_data, step_i, variant):
     for traj_idx, traj in enumerate(all_traj_data):
         traj_dir = os.path.join(base_dir, f'traj_{traj_idx}')
         os.makedirs(traj_dir, exist_ok=True)
+
+        # Q01: Multi-step consistency (per trajectory)
+        try:
+            plot_q01_multistep_consistency(traj, traj_idx, agent_internals, variant, traj_dir)
+        except Exception as e:
+            print(f'[Diagnostics] Q01 failed for traj {traj_idx}: {e}')
+            traceback.print_exc()
 
         # Q03: TD-error over time (also returns TD data for Q08)
         try:
@@ -204,15 +211,8 @@ def generate_all_diagnostics(agent, all_traj_data, step_i, variant):
             traceback.print_exc()
 
     # ------------------------------------------------------------------
-    # Aggregate plots: Q01, Q02, Q08
+    # Aggregate plots: Q02, Q08
     # ------------------------------------------------------------------
-
-    # Q01: Multi-step consistency
-    try:
-        plot_q01_multistep_consistency(all_traj_data, agent_internals, variant, aggregate_dir)
-    except Exception as e:
-        print(f'[Diagnostics] Q01 failed: {e}')
-        traceback.print_exc()
 
     # Q02: Q vs Q_targ scatter
     try:
