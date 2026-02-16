@@ -684,9 +684,13 @@ def collect_traj_residual(variant, agent, env, i, agent_dp=None):
 
 def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp=None):
     """Evaluate Residual SAC policy.
-    
+
     Uses the same logic as collect_traj_residual but without exploration noise.
+    Also collects per-step trajectory data for diagnostic plot generation.
     """
+    from examples.diagnostics.data_collector import EvalTrajectoryData
+    from examples.diagnostics.run_diagnostics import generate_all_diagnostics
+
     query_frequency = variant.query_freq
     print(f'[Eval] query frequency: {query_frequency}')
     max_timesteps = variant.max_timesteps
@@ -695,16 +699,19 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
     chunk_len = variant.chunk_len
     predict_a_exec = variant.get('predict_a_exec', False)
     use_vlm_embedding = variant.get('use_vlm_embedding', False)
-    
+
     episode_returns = []
     highest_rewards = []
     success_rates = []
     episode_lens = []
-    
+
     # Track residual statistics across evaluation
     all_delta_norms = []
     all_base_norms = []
     all_clipping_rates = []
+
+    # Diagnostics: collect trajectory data for all rollouts
+    all_traj_data = []
 
     rng = jax.random.PRNGKey(variant.seed + 456)
 
@@ -715,23 +722,30 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
             obs, _ = env.reset()
         elif variant.env == 'cartpole':
             obs = env.reset()
-            
+
         image_list = []
         rewards = []
-        
+
+        # Diagnostics: per-query-step storage
+        diag_obs_dicts = []
+        diag_base_actions = []
+        diag_delta_actions = []
+        diag_a_exec = []
+        episode_terminated = False
+
         for t in tqdm(range(max_timesteps)):
             curr_image = obs_to_img(obs, variant)
 
             if t % query_frequency == 0:
                 qpos = obs_to_qpos(obs, variant)
-                
+
                 assert agent_dp is not None
-                
+
                 # 1. Query frozen Pi-0.5
                 obs_pi_zero = obs_to_pi_zero_input(obs, variant)
                 infer_result = agent_dp.infer(obs_pi_zero, return_vlm_embedding=use_vlm_embedding)
                 base_actions = infer_result["actions"][:chunk_len]
-                
+
                 # 2. Build SAC observation
                 if use_vlm_embedding:
                     vlm_hidden_state = infer_result["vlm_embedding"][0]
@@ -757,9 +771,9 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
                         'pixels': curr_image[np.newaxis, ..., np.newaxis],
                         'base_action': base_actions[np.newaxis, ..., np.newaxis],
                     }
-                
+
                 rng, key = jax.random.split(rng)
-                
+
                 if i == 0:
                     # Initial evaluation: zero residual to test base policy
                     delta_actions = np.zeros((query_frequency, variant.action_dim))
@@ -768,12 +782,12 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
                     # SAC samples residual (deterministic: use mean)
                     actions_flat = agent.eval_actions(obs_dict)  # Use eval_actions for deterministic
                     raw_actions = np.reshape(actions_flat, (query_frequency, variant.action_dim))
-                    
+
                     # NaN guard: if action contains NaN/Inf, replace with zeros
                     if not np.all(np.isfinite(raw_actions)):
                         print(f"[WARNING] NaN/Inf detected in eval actions at t={t}, replacing with zeros")
                         raw_actions = np.nan_to_num(raw_actions, nan=0.0, posinf=0.0, neginf=0.0)
-                    
+
                     if predict_a_exec:
                         # Actor predicts a_exec directly
                         actions = np.clip(raw_actions, -1.0, 1.0)
@@ -782,9 +796,9 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
                         # Original: actor predicts delta, compose a_exec
                         delta_actions = raw_actions
                         actions = np.clip(base_actions[:query_frequency] + residual_alpha * delta_actions, -1.0, 1.0)
-                
+
                 # 3. Compose executed action (already done above)
-                
+
                 # Track statistics
                 delta_norm = np.linalg.norm(delta_actions.flatten())
                 base_norm = np.linalg.norm(base_actions.flatten())
@@ -792,9 +806,15 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
                 all_delta_norms.append(delta_norm)
                 all_base_norms.append(base_norm)
                 all_clipping_rates.append(clipping_rate)
-              
+
+                # Diagnostics: store per-query-step data
+                diag_obs_dicts.append({k: np.copy(v) for k, v in obs_dict.items()})
+                diag_base_actions.append(np.copy(base_actions))
+                diag_delta_actions.append(np.copy(delta_actions))
+                diag_a_exec.append(np.copy(actions))
+
             action_t = actions[t % query_frequency]
-            
+
             if 'libero' in variant.env:
                 obs, reward, done, _ = env.step(action_t)
             elif 'aloha' in variant.env:
@@ -802,11 +822,43 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
                 done = terminated or truncated
             elif variant.env == 'cartpole':
                 obs, reward, done, eval_info = env.step(action_t)
-                
+
             rewards.append(reward)
             image_list.append(curr_image)
             if done:
+                episode_terminated = True
                 break
+
+        # Diagnostics: add final observation for bootstrapping
+        final_image = obs_to_img(obs, variant)
+        final_qpos = obs_to_qpos(obs, variant)
+        last_base = diag_base_actions[-1] if diag_base_actions else np.zeros((chunk_len, variant.action_dim))
+        if use_vlm_embedding:
+            obs_pi_zero_final = obs_to_pi_zero_input(obs, variant)
+            final_infer = agent_dp.infer(obs_pi_zero_final, return_vlm_embedding=True)
+            vlm_hs = final_infer["vlm_embedding"][0]
+            if vlm_hs.ndim == 3 and vlm_hs.shape[0] == 1:
+                vlm_hs = vlm_hs[0]
+            vlm_hs = np.mean(vlm_hs, axis=0)
+            final_obs_dict = {
+                'pixels': final_image[np.newaxis, ..., np.newaxis],
+                'vlm_embedding': vlm_hs[np.newaxis, ..., np.newaxis],
+                'base_action': last_base[np.newaxis, ..., np.newaxis],
+            }
+            if variant.add_states:
+                final_obs_dict['state'] = final_qpos[np.newaxis, ..., np.newaxis]
+        elif variant.add_states:
+            final_obs_dict = {
+                'pixels': final_image[np.newaxis, ..., np.newaxis],
+                'state': final_qpos[np.newaxis, ..., np.newaxis],
+                'base_action': last_base[np.newaxis, ..., np.newaxis],
+            }
+        else:
+            final_obs_dict = {
+                'pixels': final_image[np.newaxis, ..., np.newaxis],
+                'base_action': last_base[np.newaxis, ..., np.newaxis],
+            }
+        diag_obs_dicts.append({k: np.copy(v) for k, v in final_obs_dict.items()})
 
         # Per episode stats
         episode_lens.append(t + 1)
@@ -820,27 +872,44 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
         else:
             is_success = (reward == env_max_reward)
         success_rates.append(is_success)
-                
+
         print(f'Rollout {rollout_id}: {episode_return=}, Success: {is_success}')
         video = np.stack(image_list).transpose(0, 3, 1, 2)
         wandb_logger.log({f'eval_video/{rollout_id}': wandb.Video(video, fps=50)}, step=i)
+
+        # Diagnostics: build trajectory data
+        truncated_episode = (not episode_terminated) or (t + 1 >= max_timesteps and not episode_terminated)
+        traj_data = EvalTrajectoryData(
+            obs_dicts=diag_obs_dicts,
+            base_actions=np.array(diag_base_actions),
+            delta_actions=np.array(diag_delta_actions),
+            a_exec=np.array(diag_a_exec),
+            rewards=rewards,
+            terminated=episode_terminated and not truncated_episode,
+            truncated=truncated_episode,
+            is_success=is_success,
+            images=image_list,
+            episode_return=episode_return,
+            query_frequency=query_frequency,
+        )
+        all_traj_data.append(traj_data)
 
     # Log aggregate statistics
     success_rate = np.mean(np.array(success_rates))
     avg_return = np.mean(episode_returns)
     avg_episode_len = np.mean(episode_lens)
-    
+
     summary_str = f'\nSuccess rate: {success_rate}\nAverage return: {avg_return}\n\n'
     wandb_logger.log({'evaluation/avg_return': avg_return}, step=i)
     wandb_logger.log({'evaluation/success_rate': success_rate}, step=i)
     wandb_logger.log({'evaluation/avg_episode_len': avg_episode_len}, step=i)
-    
+
     # Log residual-specific evaluation metrics
     wandb_logger.log({'evaluation/delta_norm_mean': np.mean(all_delta_norms)}, step=i)
     wandb_logger.log({'evaluation/delta_norm_std': np.std(all_delta_norms)}, step=i)
     wandb_logger.log({'evaluation/base_norm_mean': np.mean(all_base_norms)}, step=i)
     wandb_logger.log({'evaluation/clipping_rate_mean': np.mean(all_clipping_rates)}, step=i)
-    
+
     for r in range(env_max_reward + 1):
         more_or_equal_r = (np.array(highest_rewards) >= r).sum()
         more_or_equal_r_rate = more_or_equal_r / variant.eval_episodes
@@ -848,6 +917,17 @@ def perform_control_eval_residual(agent, env, i, variant, wandb_logger, agent_dp
         summary_str += f'Reward >= {r}: {more_or_equal_r}/{variant.eval_episodes} = {more_or_equal_r_rate*100}%\n'
 
     print(summary_str)
+
+    # Generate diagnostic plots
+    try:
+        diag_freq = getattr(variant, 'diagnostic_freq', 1)
+        if diag_freq != 0:
+            diag_traj_data = all_traj_data[::max(1, diag_freq)]
+            generate_all_diagnostics(agent, diag_traj_data, i, variant)
+    except Exception as e:
+        print(f'[Diagnostics] Failed to generate diagnostics: {e}')
+        import traceback
+        traceback.print_exc()
 
 
 def make_multiple_value_reward_visulizations_residual(agent, variant, i, replay_buffer, wandb_logger):

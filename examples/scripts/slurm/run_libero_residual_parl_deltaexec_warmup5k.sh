@@ -60,7 +60,7 @@ python -m examples.launch_train_sim_residual \
     --batch_size 64 \
     --discount 0.999 \
     --seed 0 \
-    --max_steps 2500000 \
+    --max_steps 2500 \
     --eval_interval 5000 \
     --log_interval 500 \
     --checkpoint_interval 10000 \

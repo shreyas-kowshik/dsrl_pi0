@@ -22,6 +22,7 @@ if __name__ == '__main__':
     parser.add_argument('--env', default='libero', help='Name of environment (libero, aloha_cube, cartpole)')
     parser.add_argument('--log_interval', default=1000, help='Logging interval.', type=int)
     parser.add_argument('--eval_interval', default=5000, help='Eval interval.', type=int)
+    parser.add_argument('--diagnostic_freq', default=1, help='Generate diagnostics for every Nth eval trajectory (1=all, 2=half, etc). 0 disables diagnostics.', type=int)
     parser.add_argument('--checkpoint_interval', default=-1, help='Checkpoint interval.', type=int)
     parser.add_argument('--batch_size', default=16, help='Mini batch size.', type=int)
     parser.add_argument('--max_steps', default=int(1e6), help='Number of training steps.', type=int)
@@ -94,6 +95,10 @@ if __name__ == '__main__':
     parser.add_argument('--on_policy_ppo', default=0, help='Use on-policy PPO with stored log_probs (1=yes, 0=no)', type=int)
     parser.add_argument('--normalize_advantages', default=0, help='Normalize advantages (1=yes, 0=no)', type=int)
     
+    # Actor architecture / optimizer
+    parser.add_argument('--actor_hidden_dims', default='', help='Actor MLP hidden dims (comma-separated, e.g. "256,256"). Empty=use --hidden_dims.', type=str)
+    parser.add_argument('--actor_optimizer', default='adam', help='Optimizer for actor: adam or sgd', type=str)
+
     # Policy std bounds (NaN stability)
     parser.add_argument('--log_std_min', default=-5.0, help='Min log_std for policy (NaN stability)', type=float)
     parser.add_argument('--log_std_max', default=2.0, help='Max log_std for policy', type=float)
@@ -156,7 +161,14 @@ if __name__ == '__main__':
     variant['normalize_advantages'] = bool(variant.get('normalize_advantages', 0))
     variant['learn_std'] = bool(variant.get('learn_std', 1))
     variant['use_vlm_embedding'] = bool(variant.get('use_vlm_embedding', 0))
-    
+
+    # Parse actor_hidden_dims: comma-separated string -> tuple of ints, or None
+    actor_hd_str = variant.get('actor_hidden_dims', '')
+    if actor_hd_str and str(actor_hd_str).strip():
+        variant['actor_hidden_dims'] = tuple(int(x) for x in str(actor_hd_str).split(','))
+    else:
+        variant['actor_hidden_dims'] = None  # will default to hidden_dims in learner
+
     algo = variant.get('algo', 'residual_sac')
     print("=" * 60)
     print(f"RESIDUAL RL CONFIGURATION ({algo.upper()})")

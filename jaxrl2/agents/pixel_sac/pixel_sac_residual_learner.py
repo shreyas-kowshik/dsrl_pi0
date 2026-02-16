@@ -309,6 +309,8 @@ class PixelSACResidualLearner(Agent):
                  log_std_max: float = 2.0,
                  learn_std: bool = True,
                  fixed_log_std: float = -0.5,
+                 actor_optimizer: str = 'adam',
+                 actor_hidden_dims: Optional[Sequence[int]] = None,
                  ):
         """Initialize Residual SAC Learner.
         
@@ -409,20 +411,25 @@ class PixelSACResidualLearner(Agent):
 
         if len(hidden_dims) == 1:
             hidden_dims = (hidden_dims[0], hidden_dims[0], hidden_dims[0])
-        
+
+        # Resolve actor hidden dims (may differ from critic)
+        a_hidden_dims = actor_hidden_dims if actor_hidden_dims is not None else hidden_dims
+        if len(a_hidden_dims) == 1:
+            a_hidden_dims = (a_hidden_dims[0], a_hidden_dims[0], a_hidden_dims[0])
+
         # Actor: outputs residual actions (delta) in [-action_magnitude, action_magnitude]
         if learn_std:
             policy_def = LearnedStdTanhNormalPolicy(
-                hidden_dims, self.action_dim, 
-                dropout_rate=dropout_rate, 
+                a_hidden_dims, self.action_dim,
+                dropout_rate=dropout_rate,
                 log_std_min=log_std_min,
                 log_std_max=log_std_max,
-                low=-action_magnitude, 
+                low=-action_magnitude,
                 high=action_magnitude
             )
         else:
             policy_def = FixedStdTanhNormalPolicy(
-                hidden_dims, self.action_dim,
+                a_hidden_dims, self.action_dim,
                 dropout_rate=dropout_rate,
                 fixed_log_std=fixed_log_std,
                 low=-action_magnitude,
@@ -438,20 +445,26 @@ class PixelSACResidualLearner(Agent):
             use_vlm_embedding=use_vlm_embedding,
         )
         print(f"Residual SAC Actor: {actor_def}")
+        print(f"  actor_hidden_dims={a_hidden_dims}, actor_optimizer={actor_optimizer}")
         actor_def_init = actor_def.init(actor_key, observations)
         actor_params = actor_def_init['params']
         actor_batch_stats = actor_def_init['batch_stats'] if 'batch_stats' in actor_def_init else None
-        actor_optimizer = optax.chain(
-            optax.clip_by_global_norm(self.max_grad_norm),
-            optax.adam(learning_rate=actor_lr),
-        )
+        if actor_optimizer == 'sgd':
+            actor_opt = optax.chain(
+                optax.clip_by_global_norm(self.max_grad_norm),
+                optax.sgd(learning_rate=actor_lr),
+            )
+        else:
+            actor_opt = optax.chain(
+                optax.clip_by_global_norm(self.max_grad_norm),
+                optax.adam(learning_rate=actor_lr),
+            )
 
         actor = TrainState.create(
             apply_fn=actor_def.apply,
             params=actor_params,
-            tx=actor_optimizer,
+            tx=actor_opt,
             batch_stats=actor_batch_stats,
-            
         )
 
         # Critic: takes observations and executed actions (not residuals)
