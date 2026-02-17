@@ -17,6 +17,7 @@ xla_flags = os.environ.get('XLA_FLAGS', '')
 xla_flags += ' --xla_gpu_triton_gemm_any=True'
 os.environ['XLA_FLAGS'] = xla_flags
 
+import json
 import pathlib
 import functools
 import math
@@ -207,6 +208,137 @@ def collect_trajectories(variant, agent_dp, env, num_trajectories):
     return all_trajs, success_trajs
 
 
+def load_expert_trajectories(expert_data_path, query_freq, task_description):
+    """Load expert trajectories from a LeRobot dataset using a pre-computed JSON dump.
+
+    The JSON dump (produced by openpi/scripts/dump_filtered_data.py) contains
+    episode indices and per-episode sample ranges.  This function loads the
+    corresponding LeRobot samples and reconstructs trajectory dicts in the same
+    format returned by ``collect_trajectory_base_policy``, so they can be fed
+    directly into ``build_training_samples``.
+
+    Args:
+        expert_data_path: Path to a JSON dump file **or** a directory of JSON
+            dump files.  When a directory is given every ``*.json`` inside it
+            is loaded and merged.
+        query_freq: Query frequency (env steps per policy query).
+        task_description: The task prompt string (e.g. the LIBERO task
+            description) to embed in each observation dict.
+
+    Returns:
+        List of trajectory dicts (same schema as ``collect_trajectory_base_policy``).
+    """
+    import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+    import einops
+
+    # ------------------------------------------------------------------
+    # 1. Collect all JSON dump files
+    # ------------------------------------------------------------------
+    expert_data_path = str(expert_data_path)
+    if os.path.isdir(expert_data_path):
+        json_files = sorted(
+            os.path.join(expert_data_path, f)
+            for f in os.listdir(expert_data_path)
+            if f.endswith('.json')
+        )
+    else:
+        json_files = [expert_data_path]
+
+    if not json_files:
+        print(f"WARNING: No JSON files found at {expert_data_path}")
+        return []
+
+    # ------------------------------------------------------------------
+    # 2. Parse dumps – group episode sample ranges by repo_id
+    # ------------------------------------------------------------------
+    # repo_id -> {ep_idx: [sample_indices]}
+    repo_episodes: dict[str, dict[int, list[int]]] = {}
+    for jf in json_files:
+        with open(jf, 'r') as f:
+            dump = json.load(f)
+        repo_id = dump['repo_id']
+        ep_to_samples = dump['episode_to_sample_indices']
+        repo_episodes.setdefault(repo_id, {})
+        for ep_str, sample_idxs in ep_to_samples.items():
+            ep_idx = int(ep_str)
+            if ep_idx not in repo_episodes[repo_id]:
+                repo_episodes[repo_id][ep_idx] = sample_idxs
+        print(f"  Loaded expert dump: {jf} "
+              f"({len(ep_to_samples)} episodes, {dump['total_samples']} samples)")
+
+    # ------------------------------------------------------------------
+    # 3. Load LeRobot dataset(s) and reconstruct trajectories
+    # ------------------------------------------------------------------
+    expert_trajs = []
+
+    for repo_id, episodes_map in repo_episodes.items():
+        print(f"  Loading LeRobot dataset '{repo_id}' ...")
+        dataset = lerobot_dataset.LeRobotDataset(repo_id)
+
+        for ep_idx, sample_indices in sorted(episodes_map.items()):
+            sample_indices = sorted(sample_indices)
+            num_steps = len(sample_indices)
+
+            obs_pi_zero_list = []
+            executed_actions = []
+
+            for step_i, global_idx in enumerate(sample_indices):
+                sample = dataset[global_idx]
+
+                # --- per-timestep action ---
+                action = np.asarray(sample['action'], dtype=np.float32)
+                executed_actions.append(action)
+
+                # --- observation at query boundaries ---
+                if step_i % query_freq == 0:
+                    # Convert image from LeRobot (C,H,W float32) -> (H,W,C uint8)
+                    img = np.asarray(sample['image'])
+                    if np.issubdtype(img.dtype, np.floating):
+                        img = (255 * img).astype(np.uint8)
+                    if img.ndim == 3 and img.shape[0] == 3:
+                        img = einops.rearrange(img, 'c h w -> h w c')
+                    img = image_tools.convert_to_uint8(
+                        image_tools.resize_with_pad(img, 224, 224)
+                    )
+
+                    wrist_img = np.asarray(sample['wrist_image'])
+                    if np.issubdtype(wrist_img.dtype, np.floating):
+                        wrist_img = (255 * wrist_img).astype(np.uint8)
+                    if wrist_img.ndim == 3 and wrist_img.shape[0] == 3:
+                        wrist_img = einops.rearrange(wrist_img, 'c h w -> h w c')
+                    wrist_img = image_tools.convert_to_uint8(
+                        image_tools.resize_with_pad(wrist_img, 224, 224)
+                    )
+
+                    state = np.asarray(sample['state'], dtype=np.float32)
+
+                    obs_pi_zero = {
+                        'observation/image': img,
+                        'observation/wrist_image': wrist_img,
+                        'observation/state': state,
+                        'prompt': str(task_description),
+                    }
+                    obs_pi_zero_list.append(obs_pi_zero)
+
+            executed_actions = np.array(executed_actions)
+            rewards = np.ones(num_steps, dtype=np.float32)  # expert = always reward
+
+            traj = {
+                'obs_pi_zero_list': obs_pi_zero_list,
+                'executed_actions': executed_actions,
+                'rewards': rewards,
+                'is_success': True,
+                'episode_return': float(np.sum(rewards)),
+                'env_steps': num_steps,
+                'query_frequency': query_freq,
+            }
+            expert_trajs.append(traj)
+
+        print(f"  Loaded {len(expert_trajs)} expert trajectories from '{repo_id}'")
+
+    return expert_trajs
+
+
 def build_training_samples(success_trajs, action_horizon, env_name, action_dim,
                            drop_short_actions=True):
     """Build training samples from successful trajectories.
@@ -306,10 +438,17 @@ def prepare_batch_jax(samples, agent_dp, batch_indices):
     states = np.stack([np.asarray(d["state"]) for d in batch_obs_dicts], axis=0)
     batched_state = jnp.asarray(states, dtype=jnp.float32)
 
-    prompts = np.stack([np.asarray(d["tokenized_prompt"]) for d in batch_obs_dicts], axis=0)
+    # TokenizePrompt adds a leading (1, L) dim per sample; squeeze it before stacking
+    prompts = np.stack([np.asarray(d["tokenized_prompt"]).squeeze(0)
+                        if np.asarray(d["tokenized_prompt"]).ndim >= 2
+                        else np.asarray(d["tokenized_prompt"])
+                        for d in batch_obs_dicts], axis=0)
     batched_prompt = jnp.asarray(prompts, dtype=jnp.int32)
 
-    prompt_masks = np.stack([np.asarray(d["tokenized_prompt_mask"]) for d in batch_obs_dicts], axis=0)
+    prompt_masks = np.stack([np.asarray(d["tokenized_prompt_mask"]).squeeze(0)
+                             if np.asarray(d["tokenized_prompt_mask"]).ndim >= 2
+                             else np.asarray(d["tokenized_prompt_mask"])
+                             for d in batch_obs_dicts], axis=0)
     batched_prompt_mask = jnp.asarray(prompt_masks, dtype=jnp.bool_)
 
     obs_dict = {
@@ -590,6 +729,31 @@ def main_base_policy_distillation(variant):
     global_train_step = 0
     rng = jax.random.PRNGKey(variant.seed)
 
+    cumulative_data = variant.get('cumulative_data', False)
+    cumulative_success_trajs = []  # Buffer for all successful trajectories across rounds
+
+    # =========================================================================
+    # Load expert trajectories (if enabled)
+    # =========================================================================
+    load_expert = variant.get('load_expert_data', False)
+    expert_trajs = []
+    if load_expert:
+        expert_data_path = variant.get('expert_data_path', '')
+        if not expert_data_path:
+            raise ValueError("--load_expert_data is set but --expert_data_path is empty.")
+        print("\n" + "=" * 60)
+        print("LOADING EXPERT TRAJECTORIES")
+        print("=" * 60)
+        expert_trajs = load_expert_trajectories(
+            expert_data_path, variant.query_freq, variant.task_description
+        )
+        print(f"Loaded {len(expert_trajs)} expert trajectories "
+              f"(always included as successful data).")
+        wandb_logger.log({
+            'expert/num_trajectories': len(expert_trajs),
+            'expert/total_steps': sum(t['env_steps'] for t in expert_trajs),
+        }, step=global_train_step)
+
     for round_num in range(variant.num_rounds):
         print("\n" + "=" * 60)
         print(f"ROUND {round_num + 1}/{variant.num_rounds}")
@@ -605,25 +769,51 @@ def main_base_policy_distillation(variant):
 
         total_trajs = len(all_trajs)
         num_success = len(success_trajs)
-        wandb_logger.log({
+        # Accumulate successful trajectories across rounds if cumulative_data is enabled
+        if cumulative_data:
+            cumulative_success_trajs.extend(success_trajs)
+
+        log_dict = {
             'collection/total_trajectories': total_trajs,
             'collection/successful_trajectories': num_success,
             'collection/success_rate': num_success / total_trajs if total_trajs > 0 else 0,
             'collection/round': round_num,
-        }, step=global_train_step)
+        }
+        if cumulative_data:
+            log_dict['collection/cumulative_successful_trajectories'] = len(cumulative_success_trajs)
+        wandb_logger.log(log_dict, step=global_train_step)
 
-        if num_success == 0:
-            print("WARNING: No successful trajectories collected. Skipping training for this round.")
+        # Determine whether there is any data to train on (collected + expert)
+        has_collected = (cumulative_data and len(cumulative_success_trajs) > 0) or \
+                        (not cumulative_data and num_success > 0)
+        has_expert = len(expert_trajs) > 0
+
+        if not has_collected and not has_expert:
+            print("WARNING: No successful or expert trajectories available. Skipping training for this round.")
             continue
 
         # =====================================================================
-        # Phase 2: Train agent_dp on successful trajectories
+        # Phase 2: Train agent_dp on successful trajectories (+ expert data)
         # =====================================================================
-        print(f"\nPHASE 2: Training on {num_success} successful trajectories "
+        training_trajs = cumulative_success_trajs if cumulative_data else success_trajs
+        # Always include expert trajectories in the training set
+        if has_expert:
+            training_trajs = list(training_trajs) + expert_trajs
+        num_training_trajs = len(training_trajs)
+        num_expert = len(expert_trajs)
+        collected_count = num_training_trajs - num_expert
+        extra_info = []
+        if cumulative_data and collected_count > num_success:
+            extra_info.append(f"{collected_count - num_success} from previous rounds")
+        if num_expert > 0:
+            extra_info.append(f"{num_expert} expert")
+        extra_str = f", {', '.join(extra_info)}" if extra_info else ""
+        print(f"\nPHASE 2: Training on {num_training_trajs} trajectories "
+              f"({num_success} new this round{extra_str}) "
               f"for {variant.num_train_steps_per_round} steps...")
 
         samples = build_training_samples(
-            success_trajs, action_horizon,
+            training_trajs, action_horizon,
             env_name=variant.env, action_dim=variant.action_dim,
             drop_short_actions=drop_short_actions,
         )

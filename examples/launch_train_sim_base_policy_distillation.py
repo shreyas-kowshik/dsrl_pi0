@@ -48,11 +48,27 @@ if __name__ == '__main__':
                         help='Drop training samples with fewer than action_horizon remaining steps (1=yes, 0=no). '
                              'If 0, pads with env-specific padding (Libero: [0]*6+[1]).', type=int)
 
+    # Cumulative data
+    parser.add_argument('--cumulative_data', default=0,
+                        help='If 1, keep all successful trajectories from previous rounds and train on the '
+                             'cumulative buffer. If 0, only train on the current round trajectories.', type=int)
+
+    # Expert data
+    parser.add_argument('--load_expert_data', default=0,
+                        help='If 1, load expert trajectories from the path specified by --expert_data_path '
+                             'and always include them in training as successful demonstrations.', type=int)
+    parser.add_argument('--expert_data_path', default='/home/skowshik/vla/codebase/openpi/data_dumps',
+                        help='Path to a JSON dump file or directory of JSON dumps (from '
+                             'openpi/scripts/dump_filtered_data.py) containing expert episode indices.',
+                        type=str)
+
     args = parser.parse_args()
     variant = AttrDict(vars(args))
 
     # Convert flags to booleans
     variant['drop_short_actions'] = bool(variant.get('drop_short_actions', 1))
+    variant['cumulative_data'] = bool(variant.get('cumulative_data', 0))
+    variant['load_expert_data'] = bool(variant.get('load_expert_data', 0))
 
     # Print configuration
     print("=" * 60)
@@ -70,6 +86,10 @@ if __name__ == '__main__':
     print(f"  num_train_steps_per_round: {variant.num_train_steps_per_round}")
     print(f"  batch_size: {variant.batch_size}")
     print(f"  drop_short_actions: {variant.drop_short_actions}")
+    print(f"  cumulative_data: {variant.cumulative_data}")
+    print(f"  load_expert_data: {variant.load_expert_data}")
+    if variant.load_expert_data:
+        print(f"  expert_data_path: {variant.expert_data_path}")
     print(f"  --- Eval ---")
     print(f"  eval_episodes: {variant.eval_episodes}")
     print(f"  checkpoint_interval: {variant.checkpoint_interval}")

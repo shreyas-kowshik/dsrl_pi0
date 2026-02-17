@@ -1,29 +1,29 @@
 #!/bin/bash
-#SBATCH --job-name=filtered_bc_pi05          # Job name
-#SBATCH --nodes=1                            # Number of nodes
-#SBATCH --gres=gpu:1                         # GPUs per node
-#SBATCH --cpus-per-task=12                   # CPU cores per task
-#SBATCH --mem=128G                           # Memory per node
-#SBATCH --time=48:00:00                      # Walltime (hh:mm:ss)
-#SBATCH --partition=general                  # Partition/queue name
-#SBATCH --output=/data/user_data/skowshik/parl_logs/logs/filtered_bc_libero_%x_%j.out
-#SBATCH --error=/data/user_data/skowshik/parl_logs/logs/filtered_bc_libero_%x_%j.err
+#SBATCH --job-name=fbc_cumul_pi05              # Job name
+#SBATCH --nodes=1                              # Number of nodes
+#SBATCH --gres=gpu:1                           # GPUs per node
+#SBATCH --cpus-per-task=12                     # CPU cores per task
+#SBATCH --mem=128G                             # Memory per node
+#SBATCH --time=48:00:00                        # Walltime (hh:mm:ss)
+#SBATCH --partition=general                    # Partition/queue name
+#SBATCH --output=/data/user_data/skowshik/parl_logs/logs/filtered_bc_cumul_libero_%x_%j.out
+#SBATCH --error=/data/user_data/skowshik/parl_logs/logs/filtered_bc_cumul_libero_%x_%j.err
 
 # =============================================================================
-# LIBERO: Filtered Behavior Cloning (Base Policy Distillation)
+# LIBERO: Filtered Behavior Cloning with Cumulative Data (no expert)
 # =============================================================================
 #
-# Collects trajectories from Pi-0.5 base policy, filters for successful ones,
-# and fine-tunes the base policy on the successes. Repeats for multiple rounds.
+# Same as filtered BC but with cumulative_data=1: successful trajectories from
+# all previous rounds are retained and trained on together.
 #
 # Usage:
-#   bash examples/scripts/run_libero_filtered_bc.sh
-#   sbatch examples/scripts/run_libero_filtered_bc.sh
+#   sbatch examples/scripts/slurm/run_libero_filtered_bc_cumulative.sh
 # =============================================================================
 
 # -------------------------------
 # Environment setup
 # -------------------------------
+source /data/user_data/skowshik/anaconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0
 
 mkdir -p /data/user_data/skowshik/parl_logs/logs/
@@ -46,11 +46,11 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
 # -------------------------------
-# Launch Filtered BC Training
+# Launch Filtered BC Training (cumulative, no expert)
 # -------------------------------
 python -m examples.launch_train_sim_base_policy_distillation \
     --env libero \
-    --prefix filtered_bc_pi05-mokaPots-1k \
+    --prefix filtered_bc_pi05-mokaPots-cumul \
     --wandb_project ${proj_name} \
     --seed 0 \
     \
@@ -62,11 +62,12 @@ python -m examples.launch_train_sim_base_policy_distillation \
     \
     --num_rounds 500 \
     --num_collect_trajectories 20 \
-    --num_train_steps_per_round 1000 \
+    --num_train_steps_per_round 500 \
     --batch_size 16 \
     \
     --eval_episodes 50 \
     --log_interval 50 \
-    --checkpoint_interval 1 \
+    --checkpoint_interval 5000000 \
     \
-    --drop_short_actions 1
+    --drop_short_actions 1 \
+    --cumulative_data 1

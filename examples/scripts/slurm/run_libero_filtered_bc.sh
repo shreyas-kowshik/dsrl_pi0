@@ -17,13 +17,13 @@
 # and fine-tunes the base policy on the successes. Repeats for multiple rounds.
 #
 # Usage:
-#   bash examples/scripts/run_libero_filtered_bc.sh
-#   sbatch examples/scripts/run_libero_filtered_bc.sh
+#   sbatch examples/scripts/slurm/run_libero_filtered_bc.sh
 # =============================================================================
 
 # -------------------------------
 # Environment setup
 # -------------------------------
+source /data/user_data/skowshik/anaconda3/etc/profile.d/conda.sh
 conda activate dsrl_pi0
 
 mkdir -p /data/user_data/skowshik/parl_logs/logs/
@@ -62,11 +62,11 @@ python -m examples.launch_train_sim_base_policy_distillation \
     \
     --num_rounds 500 \
     --num_collect_trajectories 20 \
-    --num_train_steps_per_round 1000 \
+    --num_train_steps_per_round 500 \
     --batch_size 16 \
     \
     --eval_episodes 50 \
     --log_interval 50 \
-    --checkpoint_interval 1 \
+    --checkpoint_interval 5000000 \
     \
     --drop_short_actions 1
