@@ -51,7 +51,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 # -------------------------------
 python -m examples.launch_train_sim_base_policy_distillation \
     --env libero \
-    --prefix filtered_bc_pi05-mokaPots-cumul-expert \
+    --prefix filtered_bc_pi05-mokaPots-cumul-expert-20rounds \
     --wandb_project ${proj_name} \
     --seed 0 \
     \
@@ -62,7 +62,7 @@ python -m examples.launch_train_sim_base_policy_distillation \
     --query_freq 10 \
     \
     --num_rounds 10 \
-    --num_collect_trajectories 50 \
+    --num_collect_trajectories 20 \
     --num_train_steps_per_round 500 \
     --batch_size 16 \
     \
