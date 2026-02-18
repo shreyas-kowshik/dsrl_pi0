@@ -229,7 +229,7 @@ def load_expert_trajectories(expert_data_path, query_freq, task_description):
         List of trajectory dicts (same schema as ``collect_trajectory_base_policy``).
     """
     import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
-    import einops
+    import datasets as hf_datasets
 
     # ------------------------------------------------------------------
     # 1. Collect all JSON dump files
@@ -249,63 +249,66 @@ def load_expert_trajectories(expert_data_path, query_freq, task_description):
         return []
 
     # ------------------------------------------------------------------
-    # 2. Parse dumps – group episode sample ranges by repo_id
+    # 2. Parse dumps – group episode indices by repo_id
     # ------------------------------------------------------------------
-    # repo_id -> {ep_idx: [sample_indices]}
-    repo_episodes: dict[str, dict[int, list[int]]] = {}
+    # repo_id -> set of episode indices
+    repo_episodes: dict[str, set[int]] = {}
     for jf in json_files:
         with open(jf, 'r') as f:
             dump = json.load(f)
         repo_id = dump['repo_id']
-        ep_to_samples = dump['episode_to_sample_indices']
-        repo_episodes.setdefault(repo_id, {})
-        for ep_str, sample_idxs in ep_to_samples.items():
-            ep_idx = int(ep_str)
-            if ep_idx not in repo_episodes[repo_id]:
-                repo_episodes[repo_id][ep_idx] = sample_idxs
+        ep_indices = dump['episode_indices']
+        repo_episodes.setdefault(repo_id, set())
+        repo_episodes[repo_id].update(ep_indices)
         print(f"  Loaded expert dump: {jf} "
-              f"({len(ep_to_samples)} episodes, {dump['total_samples']} samples)")
+              f"({len(ep_indices)} episodes, {dump['total_samples']} samples)")
 
     # ------------------------------------------------------------------
-    # 3. Load LeRobot dataset(s) and reconstruct trajectories
+    # 3. Load per-episode parquet files and reconstruct trajectories
     # ------------------------------------------------------------------
     expert_trajs = []
 
-    for repo_id, episodes_map in repo_episodes.items():
-        print(f"  Loading LeRobot dataset '{repo_id}' ...")
-        dataset = lerobot_dataset.LeRobotDataset(repo_id)
+    for repo_id, episode_indices in repo_episodes.items():
+        # Use LeRobotDatasetMetadata to find the local data root
+        meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+        data_root = meta.root
+        data_path_pattern = meta.info.get(
+            'data_path', 'data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet'
+        )
+        chunks_size = meta.info.get('chunks_size', 1000)
+        print(f"  Loading episodes from '{data_root}' ...")
 
-        for ep_idx, sample_indices in sorted(episodes_map.items()):
-            sample_indices = sorted(sample_indices)
-            num_steps = len(sample_indices)
+        for ep_idx in sorted(episode_indices):
+            episode_chunk = ep_idx // chunks_size
+            parquet_path = data_root / data_path_pattern.format(
+                episode_chunk=episode_chunk, episode_index=ep_idx
+            )
+            if not parquet_path.exists():
+                print(f"  WARNING: Parquet file not found: {parquet_path}, skipping episode {ep_idx}")
+                continue
+
+            ep_ds = hf_datasets.Dataset.from_parquet(str(parquet_path))
+            num_steps = len(ep_ds)
 
             obs_pi_zero_list = []
             executed_actions = []
 
-            for step_i, global_idx in enumerate(sample_indices):
-                sample = dataset[global_idx]
+            for step_i in range(num_steps):
+                sample = ep_ds[step_i]
 
                 # --- per-timestep action ---
-                action = np.asarray(sample['action'], dtype=np.float32)
+                action = np.asarray(sample['actions'], dtype=np.float32)
                 executed_actions.append(action)
 
                 # --- observation at query boundaries ---
                 if step_i % query_freq == 0:
-                    # Convert image from LeRobot (C,H,W float32) -> (H,W,C uint8)
-                    img = np.asarray(sample['image'])
-                    if np.issubdtype(img.dtype, np.floating):
-                        img = (255 * img).astype(np.uint8)
-                    if img.ndim == 3 and img.shape[0] == 3:
-                        img = einops.rearrange(img, 'c h w -> h w c')
+                    # Images come as PIL images from parquet -> convert to (H,W,C) uint8
+                    img = np.asarray(sample['image'], dtype=np.uint8)
                     img = image_tools.convert_to_uint8(
                         image_tools.resize_with_pad(img, 224, 224)
                     )
 
-                    wrist_img = np.asarray(sample['wrist_image'])
-                    if np.issubdtype(wrist_img.dtype, np.floating):
-                        wrist_img = (255 * wrist_img).astype(np.uint8)
-                    if wrist_img.ndim == 3 and wrist_img.shape[0] == 3:
-                        wrist_img = einops.rearrange(wrist_img, 'c h w -> h w c')
+                    wrist_img = np.asarray(sample['wrist_image'], dtype=np.uint8)
                     wrist_img = image_tools.convert_to_uint8(
                         image_tools.resize_with_pad(wrist_img, 224, 224)
                     )
@@ -701,10 +704,16 @@ def main_base_policy_distillation(variant):
     # Use trainable filter from config (respects LoRA / freeze settings)
     trainable_filter = config.trainable_filter if hasattr(config, 'trainable_filter') else nnx.Param
 
+    # Optionally override the LR schedule with a flat (constant) learning rate
+    lr_schedule = config.lr_schedule
+    if variant.get('flat_lr') is not None:
+        lr_schedule = openpi_optimizer.FlatLRSchedule(lr=variant.flat_lr)
+        print(f"Overriding LR schedule with flat LR: {variant.flat_lr}")
+
     # Create optimizer using the same settings as the pi0.5 training config
-    tx = openpi_optimizer.create_optimizer(config.optimizer, config.lr_schedule)
+    tx = openpi_optimizer.create_optimizer(config.optimizer, lr_schedule)
     print(f"Optimizer from config: {config.optimizer}")
-    print(f"LR schedule from config: {config.lr_schedule}")
+    print(f"LR schedule: {lr_schedule}")
 
     # Initialize optimizer state from current model params
     params = nnx.state(model)

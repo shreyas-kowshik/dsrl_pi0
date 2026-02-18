@@ -53,6 +53,11 @@ if __name__ == '__main__':
                         help='If 1, keep all successful trajectories from previous rounds and train on the '
                              'cumulative buffer. If 0, only train on the current round trajectories.', type=int)
 
+    # Learning rate override
+    parser.add_argument('--flat_lr', default=None, type=float,
+                        help='If provided, override the config LR schedule with a flat (constant) learning rate. '
+                             'Uses the same default AdamW optimizer from the pi0.5 config, but with this fixed LR.')
+
     # Expert data
     parser.add_argument('--load_expert_data', default=0,
                         help='If 1, load expert trajectories from the path specified by --expert_data_path '
@@ -87,6 +92,8 @@ if __name__ == '__main__':
     print(f"  batch_size: {variant.batch_size}")
     print(f"  drop_short_actions: {variant.drop_short_actions}")
     print(f"  cumulative_data: {variant.cumulative_data}")
+    if variant.get('flat_lr') is not None:
+        print(f"  flat_lr: {variant.flat_lr}")
     print(f"  load_expert_data: {variant.load_expert_data}")
     if variant.load_expert_data:
         print(f"  expert_data_path: {variant.expert_data_path}")
