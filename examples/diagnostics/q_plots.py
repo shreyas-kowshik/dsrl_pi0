@@ -783,10 +783,13 @@ def plot_q09_q_variance_base(traj, traj_idx, agent_internals, variant, save_dir,
         a_base_samples = np.clip(a_base_flat[None] + noise, -1, 1)  # (K, action_dim_flat)
         a_base_jax = jnp.asarray(a_base_samples)
 
+        # Tile obs to match K-action batch size before calling critic
+        obs_t_tiled = {k: jnp.repeat(v, K, axis=0) for k, v in obs_t.items()}
+
         # Evaluate all Q heads on K actions: (num_qs, K)
         qs = np.array(compute_q_values_all_heads(
             ai['critic_params'], ai['critic_apply_fn'],
-            obs_t, a_base_jax))  # (num_qs, K)
+            obs_t_tiled, a_base_jax))  # (num_qs, K)
 
         # Per-head variance across K actions
         per_head_var = qs.var(axis=1)  # (num_qs,)
@@ -867,10 +870,13 @@ def plot_q10_q_variance_exec(traj, traj_idx, agent_internals, variant, save_dir,
             qf, K=K, predict_a_exec=predict_a_exec,
         )  # (K, action_dim_flat)
 
+        # Tile obs to match K-action batch size before calling critic
+        obs_t_tiled = {k: jnp.repeat(v, K, axis=0) for k, v in obs_t.items()}
+
         # Evaluate all Q heads on K actions: (num_qs, K)
         qs = np.array(compute_q_values_all_heads(
             ai['critic_params'], ai['critic_apply_fn'],
-            obs_t, a_exec_samples))  # (num_qs, K)
+            obs_t_tiled, a_exec_samples))  # (num_qs, K)
 
         # Per-head variance across K actions
         per_head_var = qs.var(axis=1)  # (num_qs,)

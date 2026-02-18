@@ -83,8 +83,8 @@ bash examples/scripts/run_real.sh
 ## Visualize Diagnostics
 ```
 python3 -m examples.visualize_diagnostics \
-    --sh_path examples/scripts/slurm/run_libero_residual_sac.sh \
-    --port 8502 --step 30000
+    --diagnostics_dir /data/user_data/skowshik/libero-residual-sac-eval/r-sac-a-exec_pi5_2moka-pots-ckpt-vlm-embedding-bc-warmup_2026_02_16_18_46_11_0000--s-0/checkpoint75000/diagnostics \
+    --port 8502
 
 ```
 
