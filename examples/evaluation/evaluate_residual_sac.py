@@ -36,6 +36,8 @@ import pathlib
 import re
 import traceback
 
+import imageio.v2 as imageio
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -71,6 +73,27 @@ compilation_cache.initialize_cache(os.path.join(_home_dir, 'jax_compilation_cach
 
 # Apply the openpi Policy monkey-patch (fixes tokenized_prompt batch-dim issue)
 patch_openpi_policy()
+
+
+# ---------------------------------------------------------------------------
+# Video writing helper
+# ---------------------------------------------------------------------------
+
+def _write_mp4(frames, filepath, fps=20):
+    """Write a list of (H, W, 3) uint8 RGB frames to an .mp4 file."""
+    if not frames:
+        return
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    writer = imageio.get_writer(
+        filepath, fps=fps, codec='libx264',
+        output_params=['-pix_fmt', 'yuv420p'],
+    )
+    for frame in frames:
+        h, w = frame.shape[:2]
+        h = h if h % 2 == 0 else h - 1
+        w = w if w % 2 == 0 else w - 1
+        writer.append_data(frame[:h, :w])
+    writer.close()
 
 
 # ---------------------------------------------------------------------------
@@ -454,20 +477,22 @@ def run_evaluation(variant):
     if variant.env == 'libero':
         from libero.libero import benchmark
         from libero.libero.envs import OffScreenRenderEnv
+        from examples.perturbation import setup_libero_pro_env
 
+        task_suite_name = setup_libero_pro_env(variant.task_suite_name, variant)
         benchmark_dict = benchmark.get_benchmark_dict()
-        task_suite = benchmark_dict['libero_10']()
+        task_suite = benchmark_dict[task_suite_name]()
         if variant.libero_task:
             task_names = task_suite.get_task_names()
             matching = [i for i, name in enumerate(task_names) if name == variant.libero_task]
             if len(matching) != 1:
                 raise ValueError(
-                    f"Task '{variant.libero_task}' not found in libero_10. "
+                    f"Task '{variant.libero_task}' not found in {task_suite_name}. "
                     f"Available: {task_names}"
                 )
             task_id = matching[0]
         else:
-            task_id = 8  # KITCHEN_SCENE8_put_both_moka_pots_on_the_stove
+            task_id = variant.task_id
         task = task_suite.get_task(task_id)
         env, task_description = _get_libero_env(task, 224, variant.seed)
         variant.task_description = task_description
@@ -612,6 +637,9 @@ def run_evaluation(variant):
     all_traj_data = []
     all_stats = []
 
+    videos_dir = os.path.join(output_dir, 'videos')
+    os.makedirs(videos_dir, exist_ok=True)
+
     print(f'\nRunning {num_evals} evaluation trajectories...\n')
     for rollout_id in range(num_evals):
         print(f'--- Rollout {rollout_id + 1}/{num_evals} ---')
@@ -625,6 +653,10 @@ def run_evaluation(variant):
             f'len={stats["episode_len"]}  '
             f'success={bool(stats["is_success"])}'
         )
+
+        video_path = os.path.join(videos_dir, f'rollout_{rollout_id:04d}.mp4')
+        _write_mp4(traj_data.images, video_path)
+        print(f'  video -> {video_path}')
 
     # ------------------------------------------------------------------
     # Separate trajectories into success / fail buckets
@@ -747,6 +779,14 @@ if __name__ == '__main__':
     parser.add_argument('--pi_05_config', default='', type=str)
     parser.add_argument('--pi_05_ckpt_dir', default='', type=str)
     parser.add_argument('--libero_task', default='', type=str)
+    parser.add_argument('--task_suite_name', default='libero_10', type=str)
+    parser.add_argument('--task_id', default=8, type=int)
+    parser.add_argument('--eval_config_path', default='LIBERO-PRO/evaluation_config.yaml', type=str)
+    parser.add_argument('--use_swap', default=0, type=int)
+    parser.add_argument('--use_object', default=0, type=int)
+    parser.add_argument('--use_language', default=0, type=int)
+    parser.add_argument('--use_task', default=0, type=int)
+    parser.add_argument('--use_environment', default=0, type=int)
     parser.add_argument('--cartpole_horizon', default=100, type=int)
 
     # Residual
@@ -855,6 +895,11 @@ if __name__ == '__main__':
     variant['learn_std'] = bool(variant.get('learn_std', 1))
     variant['use_vlm_embedding'] = bool(variant.get('use_vlm_embedding', 0))
     variant['add_states'] = bool(variant.get('add_states', 1))
+    variant['use_swap'] = bool(variant.get('use_swap', 0))
+    variant['use_object'] = bool(variant.get('use_object', 0))
+    variant['use_language'] = bool(variant.get('use_language', 0))
+    variant['use_task'] = bool(variant.get('use_task', 0))
+    variant['use_environment'] = bool(variant.get('use_environment', 0))
 
     run_evaluation(variant)
     sys.exit(0)

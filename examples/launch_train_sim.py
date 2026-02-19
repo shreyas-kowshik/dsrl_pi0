@@ -28,7 +28,19 @@ if __name__ == '__main__':
     parser.add_argument('--pi_05_config', default='', help='config name for pi05 model', type=str)
     parser.add_argument('--pi_05_ckpt_dir', default='', help='checkpoint dir for pi05 model', type=str)
     parser.add_argument('--libero_task', default='', help='LIBERO task name (e.g. KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it)', type=str)
-    
+
+    # LIBERO task selection
+    parser.add_argument('--task_suite_name', default='libero_10', help='LIBERO task suite name', type=str)
+    parser.add_argument('--task_id', default=8, help='Task ID within the suite', type=int)
+
+    # LIBERO-PRO perturbation flags
+    parser.add_argument('--eval_config_path', default='LIBERO-PRO/evaluation_config.yaml', help='Path to evaluation config YAML for LIBERO-PRO perturbations', type=str)
+    parser.add_argument('--use_swap', default=0, help='Enable swap perturbation (1=yes, 0=no)', type=int)
+    parser.add_argument('--use_object', default=0, help='Enable object perturbation (1=yes, 0=no)', type=int)
+    parser.add_argument('--use_language', default=0, help='Enable language perturbation (1=yes, 0=no)', type=int)
+    parser.add_argument('--use_task', default=0, help='Enable task perturbation (1=yes, 0=no)', type=int)
+    parser.add_argument('--use_environment', default=0, help='Enable environment perturbation (1=yes, 0=no)', type=int)
+
     # VLM embedding flags
     parser.add_argument('--use_vlm_embedding', default=0, help='Use VLM embeddings instead of pixels (0 or 1)', type=int)
     parser.add_argument('--vlm_embedding_dim', default=2048, help='VLM embedding hidden dimension', type=int)
@@ -61,6 +73,11 @@ if __name__ == '__main__':
 
     variant, args = parse_training_args(train_args_dict, parser)
     variant['use_vlm_embedding'] = bool(variant.get('use_vlm_embedding', 0))
+    variant['use_swap'] = bool(variant.get('use_swap', 0))
+    variant['use_object'] = bool(variant.get('use_object', 0))
+    variant['use_language'] = bool(variant.get('use_language', 0))
+    variant['use_task'] = bool(variant.get('use_task', 0))
+    variant['use_environment'] = bool(variant.get('use_environment', 0))
     print(variant)
     
     # Print VLM embedding config

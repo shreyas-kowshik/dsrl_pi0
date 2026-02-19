@@ -52,6 +52,11 @@ pip install -e openpi/packages/openpi-client
 # install Libero
 pip install -e LIBERO
 pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu # needed for libero
+
+# install LIBERO-PRO (OOD evaluation benchmark)
+git clone https://github.com/Zxy-MLlab/LIBERO-PRO.git LIBERO-PRO
+echo "# LIBERO-PRO package" > LIBERO-PRO/libero/__init__.py  # required for editable install
+pip install -e LIBERO-PRO
 ```
 
 ## Training (Simulation)
@@ -88,6 +93,93 @@ python3 -m examples.visualize_diagnostics \
 
 ```
 
+## LIBERO-PRO: OOD Evaluation with Position Displacement
+
+[LIBERO-PRO](https://github.com/Zxy-MLlab/LIBERO-PRO) extends the LIBERO benchmark with five generalization dimensions: object appearance, **position displacement**, language paraphrasing, task redefinition, and environment swap. This section describes how to evaluate using the **position displacement** perturbation.
+
+### How position displacement works
+
+Position displacement shifts the initial placement regions of task objects in the BDDL scene definition. The perturbation is specified via `--use_swap` (swaps two objects' start positions using `LIBERO-PRO/libero_ood/ood_spatial_relation.yaml`) or through combined perturbation modes. When `setup_libero_pro_env` is called, it:
+
+1. Reads `LIBERO-PRO/evaluation_config.yaml` for OOD config paths.
+2. Applies the enabled perturbation(s) to every `.bddl` file in the task suite directory, writing perturbed files to a `*_temp` sibling directory.
+3. Generates new init states via `LIBERO-PRO/notebooks/generate_init_states.py`.
+4. Returns the perturbed suite name (e.g. `libero_10_swap`) for the benchmark lookup.
+
+The `LIBERO-PRO/evaluation_config.yaml` controls which OOD YAML files are used for each perturbation type.
+
+### Running position-displacement evaluation
+
+The path below re-uses the same checkpoint and Pi-0.5 config as the standard LIBERO evaluation but loads tasks from the LIBERO-PRO position-displaced benchmark (`--use_swap 1`):
+
+```bash
+bash examples/scripts/evaluate/evaluate_libero_residual_sac.sh \
+    --task_suite_name libero_10 \
+    --task_id 8 \
+    --use_swap 1
+```
+
+Or directly:
+
+```bash
+python -m examples.evaluation.evaluate_residual_sac \
+    --checkpoint_dir /path/to/checkpoint \
+    --output_dir    /path/to/output \
+    --num_evals 50 \
+    --env libero \
+    --task_suite_name libero_10 \
+    --task_id 8 \
+    --use_swap 1 \
+    --pi_05_config pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k \
+    --pi_05_ckpt_dir /path/to/pi05_ckpt \
+    --algo residual_sac \
+    --residual_alpha 0.5 \
+    --hidden_dims 512 \
+    --use_vlm_embedding 1
+```
+
+### Configuration file
+
+`LIBERO-PRO/evaluation_config.yaml` sets the paths for each OOD config:
+
+```yaml
+bddl_files_path: "./LIBERO-PRO/libero/libero/bddl_files/"
+script_path:     "./LIBERO-PRO/notebooks/generate_init_states.py"
+init_file_dir:   "./LIBERO-PRO/libero/libero/init_files/"
+
+use_environment: false
+use_swap:        false   # set to true for position displacement
+use_object:      false
+use_language:    false
+use_task:        false
+
+ood_task_configs:
+  swap:        "./LIBERO-PRO/libero_ood/ood_spatial_relation.yaml"
+  object:      "./LIBERO-PRO/libero_ood/ood_object.yaml"
+  language:    "./LIBERO-PRO/libero_ood/ood_language.yaml"
+  task:        "./LIBERO-PRO/libero_ood/ood_task.yaml"
+  environment: "./LIBERO-PRO/libero_ood/ood_environment.yaml"
+```
+
+Pass a custom config path with `--eval_config_path`.
+
 ## Credits
 This repository is built upon [jaxrl2](https://github.com/ikostrikov/jaxrl2) and [PTR](https://github.com/Asap7772/PTR) repositories. 
 In case of any questions, bugs, suggestions or improvements, please feel free to contact me at nakamoto\[at\]berkeley\[dot\]edu 
+
+
+
+```
+# Via shell script (auto-discovers OUTPUT_DIR)
+python -m examples.visualize_rollouts \
+    --sh_path examples/scripts/evaluate/evaluate_libero_pro_base_vision_pre_trained.sh \
+    --port 8502
+
+# Or point directly at the output directory
+python -m examples.visualize_rollouts \
+    --output_dir /data/user_data/skowshik/libero-pro-base-eval/pi05_libero_lora_vision_fullft_action_putbothmokapots_task_ep5_bs32_v2_icml_init_vision_full_data_trained/videos/ \
+    --port 8502
+
+```
+
+

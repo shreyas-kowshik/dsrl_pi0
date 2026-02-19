@@ -113,6 +113,18 @@ if __name__ == '__main__':
     parser.add_argument('--vlm_embedding_dim', default=2048, help='Hidden dim of VLM embedding (W in [B,S,W])', type=int)
     parser.add_argument('--vlm_seq_len', default=16, help='Sequence length of VLM embedding (S in [B,S,W])', type=int)
 
+    # LIBERO task selection
+    parser.add_argument('--task_suite_name', default='libero_10', help='LIBERO task suite name', type=str)
+    parser.add_argument('--task_id', default=8, help='Task ID within the suite', type=int)
+
+    # LIBERO-PRO perturbation flags
+    parser.add_argument('--eval_config_path', default='LIBERO-PRO/evaluation_config.yaml', help='Path to evaluation config YAML for LIBERO-PRO perturbations', type=str)
+    parser.add_argument('--use_swap', default=0, help='Enable swap perturbation (1=yes, 0=no)', type=int)
+    parser.add_argument('--use_object', default=0, help='Enable object perturbation (1=yes, 0=no)', type=int)
+    parser.add_argument('--use_language', default=0, help='Enable language perturbation (1=yes, 0=no)', type=int)
+    parser.add_argument('--use_task', default=0, help='Enable task perturbation (1=yes, 0=no)', type=int)
+    parser.add_argument('--use_environment', default=0, help='Enable environment perturbation (1=yes, 0=no)', type=int)
+
     # Checkpoint resume
     parser.add_argument('--restore_path', default='', help='Path to checkpoint dir to resume training from', type=str)
 
@@ -161,6 +173,11 @@ if __name__ == '__main__':
     variant['normalize_advantages'] = bool(variant.get('normalize_advantages', 0))
     variant['learn_std'] = bool(variant.get('learn_std', 1))
     variant['use_vlm_embedding'] = bool(variant.get('use_vlm_embedding', 0))
+    variant['use_swap'] = bool(variant.get('use_swap', 0))
+    variant['use_object'] = bool(variant.get('use_object', 0))
+    variant['use_language'] = bool(variant.get('use_language', 0))
+    variant['use_task'] = bool(variant.get('use_task', 0))
+    variant['use_environment'] = bool(variant.get('use_environment', 0))
 
     # Parse actor_hidden_dims: comma-separated string -> tuple of ints, or None
     actor_hd_str = variant.get('actor_hidden_dims', '')
