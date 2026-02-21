@@ -46,7 +46,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 # -------------------------------
 # Paths — edit these
 # -------------------------------
-OUTPUT_DIR=/data/user_data/skowshik/libero-base-eval/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_filtered_bc_v1/
+OUTPUT_DIR=/data/user_data/skowshik/libero-base-eval/pi05_libero_custom_low_mem_ep5_discrete_state_input_False_4k_filtered_bc_v1-1k_horizon/
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -56,7 +56,7 @@ mkdir -p "$OUTPUT_DIR"
 python -m examples.evaluation.evaluate_base \
     --output_dir    "$OUTPUT_DIR" \
     --num_evals     50 \
-    --max_env_steps 500 \
+    --max_env_steps 1000 \
     \
     --env libero \
     --seed 0 \

@@ -29,6 +29,8 @@ if __name__ == '__main__':
     parser.add_argument('--pi_05_config', default='', help='Config name for Pi-0.5 model', type=str)
     parser.add_argument('--pi_05_ckpt_dir', default='', help='Checkpoint dir for Pi-0.5 model', type=str)
     parser.add_argument('--libero_task', default='', help='LIBERO task name', type=str)
+    parser.add_argument('--task_suite_name', default='libero_10', help='LIBERO task suite name', type=str)
+    parser.add_argument('--task_id', default=8, help='Task ID within the suite (0-indexed)', type=int)
 
     # Action chunk parameters
     parser.add_argument('--chunk_len', default=10, help='Action chunk length (Pi-0.5 horizon used for execution)', type=int)
@@ -57,6 +59,8 @@ if __name__ == '__main__':
     parser.add_argument('--flat_lr', default=None, type=float,
                         help='If provided, override the config LR schedule with a flat (constant) learning rate. '
                              'Uses the same default AdamW optimizer from the pi0.5 config, but with this fixed LR.')
+    parser.add_argument('--warmup_steps', default=None, type=int,
+                        help='If provided, override the warmup_steps in the LR schedule from the config.')
 
     # Expert data
     parser.add_argument('--load_expert_data', default=0,
@@ -83,6 +87,8 @@ if __name__ == '__main__':
     print(f"  pi_05_config: {variant.pi_05_config}")
     print(f"  pi_05_ckpt_dir: {variant.pi_05_ckpt_dir}")
     print(f"  libero_task: {variant.libero_task}")
+    print(f"  task_suite_name: {variant.task_suite_name}")
+    print(f"  task_id: {variant.task_id}")
     print(f"  chunk_len: {variant.chunk_len}")
     print(f"  query_freq: {variant.query_freq}")
     print(f"  --- Filtered BC ---")
@@ -94,6 +100,8 @@ if __name__ == '__main__':
     print(f"  cumulative_data: {variant.cumulative_data}")
     if variant.get('flat_lr') is not None:
         print(f"  flat_lr: {variant.flat_lr}")
+    if variant.get('warmup_steps') is not None:
+        print(f"  warmup_steps (override): {variant.warmup_steps}")
     print(f"  load_expert_data: {variant.load_expert_data}")
     if variant.load_expert_data:
         print(f"  expert_data_path: {variant.expert_data_path}")

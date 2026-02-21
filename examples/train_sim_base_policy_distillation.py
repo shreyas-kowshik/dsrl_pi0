@@ -639,14 +639,15 @@ def main_base_policy_distillation(variant):
     if variant.env == 'libero':
         from libero.libero import benchmark
         benchmark_dict = benchmark.get_benchmark_dict()
-        task_suite = benchmark_dict["libero_10"]()
+        task_suite_name = variant.get('task_suite_name', 'libero_10')
+        task_suite = benchmark_dict[task_suite_name]()
         if variant.libero_task:
             task_names = task_suite.get_task_names()
             matching = [i for i, name in enumerate(task_names) if name == variant.libero_task]
             assert len(matching) == 1, f"Task '{variant.libero_task}' not found. Available: {task_names}"
             task_id = matching[0]
         else:
-            task_id = 8
+            task_id = variant.get('task_id', 8)
         task = task_suite.get_task(task_id)
         env, task_description = _get_libero_env(task, 224, variant.seed)
         eval_env = env
@@ -709,6 +710,15 @@ def main_base_policy_distillation(variant):
     if variant.get('flat_lr') is not None:
         lr_schedule = openpi_optimizer.FlatLRSchedule(lr=variant.flat_lr)
         print(f"Overriding LR schedule with flat LR: {variant.flat_lr}")
+
+    # Optionally override warmup_steps in the LR schedule
+    if variant.get('warmup_steps') is not None:
+        import dataclasses as _dc
+        if hasattr(lr_schedule, 'warmup_steps'):
+            lr_schedule = _dc.replace(lr_schedule, warmup_steps=variant.warmup_steps)
+            print(f"Overriding LR schedule warmup_steps: {variant.warmup_steps}")
+        else:
+            print(f"WARNING: LR schedule {type(lr_schedule).__name__} has no warmup_steps field, ignoring --warmup_steps")
 
     # Create optimizer using the same settings as the pi0.5 training config
     tx = openpi_optimizer.create_optimizer(config.optimizer, lr_schedule)

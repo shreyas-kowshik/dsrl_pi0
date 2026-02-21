@@ -88,7 +88,7 @@ bash examples/scripts/run_real.sh
 ## Visualize Diagnostics
 ```
 python3 -m examples.visualize_diagnostics \
-    --diagnostics_dir /data/user_data/skowshik/libero-residual-sac-eval/r-sac-a-exec_pi5_2moka-pots-ckpt-vlm-embedding-bc-warmup_2026_02_16_18_46_11_0000--s-0/checkpoint75000/diagnostics \
+    --diagnostics_dir /data/user_data/skowshik/libero-residual-sac-eval/r-sac-a-exec_pi5_2moka-pots-ckpt-vlm-embedding-bc-warmup_2026_02_16_18_46_11_0000--s-0/checkpoint25000/diagnostics \
     --port 8502
 
 ```
@@ -177,9 +177,13 @@ python -m examples.visualize_rollouts \
 
 # Or point directly at the output directory
 python -m examples.visualize_rollouts \
-    --output_dir /data/user_data/skowshik/libero-pro-base-eval/pi05_libero_lora_vision_fullft_action_putbothmokapots_task_ep5_bs32_v2_icml_init_vision_full_data_trained/videos/ \
-    --port 8502
+    --output_dir /data/user_data/skowshik/libero-base-eval/pi05_libero_custom_low_mem_ep5_bookcaddy_discrete_state_input_False_4k-500_horizon/videos/ \
+    --port 8505
 
 ```
 
+# Assets movement
+```
+path="/data/hf_cache/models/pi05_libero_lora_vision_fullft_action_placebookincaddy_task_ep5_bs32_v2_icml/pi05_libero_lora_vision_fullft_action_placebookincaddy_task_ep5_bs32_v2_icml-v1/4000/" && mkdir -p "$path/assets/libero" && cp "$path/assets/physical-intelligence/libero/norm_stats.json" "$path/assets/libero/norm_stats.json"
 
+```
