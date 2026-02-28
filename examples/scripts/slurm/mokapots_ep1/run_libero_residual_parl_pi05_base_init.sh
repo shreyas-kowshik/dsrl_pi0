@@ -1,0 +1,102 @@
+#!/bin/bash
+#SBATCH --job-name=rparl_mokapots_ep1_base       # Job name
+#SBATCH --nodes=1                          # Number of nodes
+#SBATCH --gres=gpu:1                       # GPUs per node
+#SBATCH --cpus-per-task=12                 # CPU cores per task
+#SBATCH --mem=128G                         # Memory per node
+#SBATCH --time=48:00:00                    # Walltime (hh:mm:ss)
+#SBATCH --partition=general                # Partition/queue name
+#SBATCH --output=/data/user_data/skowshik/parl_logs/logs/residual_parl_libero_%x_%j.out
+#SBATCH --error=/data/user_data/skowshik/parl_logs/logs/residual_parl_libero_%x_%j.err
+
+# =============================================================================
+# LIBERO: Residual PA-RL — Mokapots ep1, pi0.5 base (no fine-tuning) init
+# =============================================================================
+#
+# Usage:
+#   sbatch examples/scripts/slurm/mokapots_ep1/run_libero_residual_parl_pi05_base_init.sh
+# =============================================================================
+
+# -------------------------------
+# Environment setup
+# -------------------------------
+source /data/user_data/skowshik/anaconda3/etc/profile.d/conda.sh
+conda activate dsrl_pi0
+
+mkdir -p /data/user_data/skowshik/parl_logs/logs/
+
+# -------------------------------
+# Configuration
+# -------------------------------
+proj_name=libero-residual-parl
+device_id=0
+
+export DISPLAY=:0
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export MUJOCO_EGL_DEVICE_ID=$device_id
+
+export OPENPI_DATA_HOME=/data/hf_cache/pi-models/openpi
+export EXP=/data/user_data/skowshik/parl_exp/logs/$proj_name
+export CUDA_VISIBLE_DEVICES=$device_id
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+
+# -------------------------------
+# Copy norm_stats into the pi05_base checkpoint directory
+# (create_trained_policy reads from {pi_05_ckpt_dir}/assets/libero/norm_stats.json)
+# Source: original 10k pi0.5 checkpoint which holds the canonical norm_stats
+# -------------------------------
+SRC_NORM_STATS="/data/hf_cache/models/pi05_libero_lora_vision_fullft_action_putbothmokapots_task_ep1_bs32_v2_icml/pi05_libero_lora_vision_fullft_action_putbothmokapots_task_ep1_bs32_v2_icml-v1/10000/assets/physical-intelligence/libero/norm_stats.json"
+BASE_CKPT_DIR="/data/hf_cache/pi-models/openpi/openpi-assets/checkpoints/pi05_base/"
+mkdir -p "${BASE_CKPT_DIR}/assets/libero"
+cp "${SRC_NORM_STATS}" "${BASE_CKPT_DIR}/assets/libero/norm_stats.json"
+
+# -------------------------------
+# Launch Residual PA-RL Training
+# -------------------------------
+python -m examples.launch_train_sim_residual \
+    --algorithm residual_parl \
+    --algo residual_parl \
+    --env libero \
+    --prefix residual_parl_pi05-mokaPots-ep1-base-no-ft-vlm-a-exec \
+    --wandb_project ${proj_name} \
+    --batch_size 64 \
+    --discount 0.999 \
+    --seed 0 \
+    --max_steps 2500000 \
+    --eval_interval 25000 \
+    --log_interval 500 \
+    --checkpoint_interval 25000 \
+    --eval_episodes 50 \
+    --multi_grad_step 1 \
+    --encoder_type small \
+    --start_online_updates 500 \
+    --resize_image 100 \
+    --action_magnitude 1.0 \
+    --query_freq 10 \
+    --hidden_dims 512 \
+    --pi_05_config pi05_libero_base_no_ft \
+    --pi_05_ckpt_dir /data/hf_cache/pi-models/openpi/openpi-assets/checkpoints/pi05_base/ \
+    --residual_alpha 0.5 \
+    --chunk_len 10 \
+    --use_zero_residual_initially 1 \
+    --use_huber_loss 0 \
+    --num_critic_updates 20 \
+    --num_actor_updates 10 \
+    --bc_reg_coeff 0.0 \
+    --bc_on_success_only 0 \
+    --success_buffer_ratio 0.0 \
+    --success_buffer_min_size 100 \
+    --predict_a_exec 1 \
+    --parl_num_samples 16 \
+    --parl_num_elites 8 \
+    --parl_num_grad_steps 30 \
+    --parl_step_size 0.001 \
+    --bc_warmup_steps 10000 \
+    --bc_warmup_num_critic_updates 8 \
+    --bc_warmup_num_actor_updates 4 \
+    --tau 0.05 \
+    --use_vlm_embedding 1 \
+    --task_suite_name libero_10 \
+    --task_id 8
