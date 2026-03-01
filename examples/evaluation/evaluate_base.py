@@ -107,12 +107,18 @@ def collect_eval_trajectory(variant, agent_dp, env, rng):
     episode_terminated = False
     actions = None  # set on first query
 
+    flip_horizontal = variant.get('flip_horizontal', False)
+
     for t in tqdm(range(max_timesteps), desc='eval steps', leave=False):
         curr_image = obs_to_img(obs, variant)
         image_list.append(curr_image)
 
         if t % query_frequency == 0:
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
+            if flip_horizontal:
+                for key in ('observation/image', 'observation/wrist_image'):
+                    if key in obs_pi_zero:
+                        obs_pi_zero[key] = np.ascontiguousarray(obs_pi_zero[key][:, ::-1, :])
             infer_result = agent_dp.infer(obs_pi_zero)
             base_actions = infer_result["actions"][:chunk_len]  # (chunk_len, action_dim)
             actions = np.clip(base_actions, -1.0, 1.0)
@@ -162,9 +168,10 @@ def run_evaluation(variant):
     print('=' * 60)
     print('BASE POLICY EVALUATION')
     print('=' * 60)
-    print(f'  output_dir : {output_dir}')
-    print(f'  num_evals  : {num_evals}')
-    print(f'  env        : {variant.env}')
+    print(f'  output_dir       : {output_dir}')
+    print(f'  num_evals        : {num_evals}')
+    print(f'  env              : {variant.env}')
+    print(f'  flip_horizontal  : {variant.get("flip_horizontal", False)}')
     print('=' * 60)
 
     # ------------------------------------------------------------------
@@ -333,11 +340,14 @@ if __name__ == '__main__':
     parser.add_argument('--use_language', default=0, type=int)
     parser.add_argument('--use_task', default=0, type=int)
     parser.add_argument('--use_environment', default=0, type=int)
+    parser.add_argument('--flip_horizontal', default=0, type=int,
+                        help='Flip observation images horizontally before passing to the model (0/1).')
 
     args = parser.parse_args()
     variant = AttrDict(vars(args))
 
     # Convert integer flags to booleans
+    variant['flip_horizontal'] = bool(variant.get('flip_horizontal', 0))
     variant['use_swap'] = bool(variant.get('use_swap', 0))
     variant['use_object'] = bool(variant.get('use_object', 0))
     variant['use_language'] = bool(variant.get('use_language', 0))
